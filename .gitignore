@@ -1,0 +1,64 @@
+# ===== Python 標準パターン =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# テスト・型チェック関連
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ===== 仮想環境 =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== OS / エディタ =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== Claude Code ローカル設定 =====
+.claude/settings.local.json
+
+# ===== プロジェクト固有 =====
+# 本番過去データは別途配布(初期はサンプルデータのみコミット)
+data/historical/*.parquet
+
+# ユーザがアップロードした当日データ
+data/uploads/*
+!data/uploads/.gitkeep
+
+# Streamlit のシークレット
+.streamlit/secrets.toml

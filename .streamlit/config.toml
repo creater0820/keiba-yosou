@@ -1,0 +1,22 @@
+# Streamlit のグローバル設定ファイル
+# 参考: https://docs.streamlit.io/develop/api-reference/configuration/config.toml
+
+[theme]
+# 競馬場の夜間照明をイメージしたダーク系テーマ
+base = "dark"
+primaryColor = "#16A34A"           # 緑(出走サイン)
+backgroundColor = "#0F172A"        # ベース背景
+secondaryBackgroundColor = "#1E293B"  # サイドバー・カード背景
+textColor = "#E2E8F0"              # 文字色
+font = "sans serif"
+
+[server]
+# アップロード可能ファイルサイズ上限 (MB 単位)
+# 当日出馬表 CSV はせいぜい数MB なので 200MB あれば十分
+maxUploadSize = 200
+
+# Streamlit Cloud 上でも同じ設定が使われる
+headless = true
+
+[browser]
+gatherUsageStats = false           # 使用統計の送信を無効化(個人利用のためオフ)
