@@ -114,15 +114,29 @@ def rule_my_logic(horse_row, hist):
 DEFAULT_RULES = [rule_my_logic]   # 既存ルールを置き換え
 ```
 
-### Streamlit Community Cloud へのデプロイ
+### Streamlit Community Cloud へのデプロイ手順
 
-1. GitHub に **Public** リポジトリとして push
-2. https://share.streamlit.io/ にログイン(GitHub 連携)
-3. 「**New app**」 → リポジトリ・ブランチ(`main`)・メインファイル(`app.py`)を指定
-4. 「Deploy!」を押すと数分で公開 URL が発行される
-5. 以後、`main` への push は自動で再デプロイされる
+a. https://share.streamlit.io にアクセス
+b. **GitHub 連携でログイン**(初回はリポジトリ閲覧権限を許可)
+c. 右上「**New app**」 → 「**Deploy a public app from GitHub**」を選択
+   - Repository: `creater0820/keiba-yosou`
+   - Branch: `main`
+   - Main file path: `app.py`
+   - App URL (任意): `keiba-yosou` 等
+d. **Advanced settings** で Python version `3.11` を指定(任意だが推奨)
+e. 「**Deploy**」をクリック → 依存パッケージのインストールに数分かかる
+f. デプロイ完了後、`https://<your-app-name>.streamlit.app/` で公開される
+   - 以後 `main` への push 毎に **自動で再デプロイ** される
+   - 再デプロイ中も旧バージョンは閉じられず、ダウンタイムは実質ゼロ
 
 > Streamlit Cloud の無料プランは 1GB メモリ。1年分の過去データは Parquet で十数MB なので余裕で収まる。
+
+### 過去データの差し替え
+
+詳細は [docs/UPDATE_DATA.md](docs/UPDATE_DATA.md) 参照。
+要約: お父様から受領した CSV を `data/raw/` に置き、
+`python scripts/csv_to_parquet.py` を実行して
+`data/historical/*.parquet` を生成 → commit & push。
 
 ### 開発ルール
 
