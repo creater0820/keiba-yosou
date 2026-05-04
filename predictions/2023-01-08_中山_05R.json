@@ -1,0 +1,45 @@
+{
+  "race_id": "R20230108-中05",
+  "race_date": "2023-01-08",
+  "racecourse": "中山",
+  "race_number": 5,
+  "race_name": "未勝利",
+  "distance": 2200,
+  "surface": "芝",
+  "predicted_at": "2026-05-04T23:45:40",
+  "logic_version": "v0.0-seed-test",
+  "recommendations": [
+    {
+      "mark": "◎",
+      "rank": 1,
+      "horse_id": "0623130515",
+      "horse_name": "レアリーズレーヴ",
+      "score": 79.98,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    },
+    {
+      "mark": "○",
+      "rank": 2,
+      "horse_id": "0723130506",
+      "horse_name": "スズカハービン",
+      "score": 73.03,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    },
+    {
+      "mark": "▲",
+      "rank": 3,
+      "horse_id": "0623130505",
+      "horse_name": "ロッカフラダンサー",
+      "score": 68.13,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    },
+    {
+      "mark": "△",
+      "rank": 4,
+      "horse_id": "0623130504",
+      "horse_name": "シーズオブホープ",
+      "score": 66.52,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    }
+  ]
+}

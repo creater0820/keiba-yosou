@@ -1,0 +1,45 @@
+{
+  "race_id": "R20251115-福04",
+  "race_date": "2025-11-15",
+  "racecourse": "福島",
+  "race_number": 4,
+  "race_name": "未勝利*",
+  "distance": 1200,
+  "surface": "芝",
+  "predicted_at": "2026-05-04T23:45:40",
+  "logic_version": "v0.0-seed-test",
+  "recommendations": [
+    {
+      "mark": "◎",
+      "rank": 1,
+      "horse_id": "0325330416",
+      "horse_name": "カイトヴァイター",
+      "score": 79.63,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    },
+    {
+      "mark": "○",
+      "rank": 2,
+      "horse_id": "0325330409",
+      "horse_name": "レッドアイスピア",
+      "score": 73.99,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    },
+    {
+      "mark": "▲",
+      "rank": 3,
+      "horse_id": "0325330414",
+      "horse_name": "サフランメロディ",
+      "score": 68.89,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    },
+    {
+      "mark": "△",
+      "rank": 4,
+      "horse_id": "0325330402",
+      "horse_name": "ロンドンオービタル",
+      "score": 63.78,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    }
+  ]
+}

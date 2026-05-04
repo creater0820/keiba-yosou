@@ -1,0 +1,45 @@
+{
+  "race_id": "R20250105-中04",
+  "race_date": "2025-01-05",
+  "racecourse": "中山",
+  "race_number": 4,
+  "race_name": "１勝ｸﾗｽ",
+  "distance": 2400,
+  "surface": "ダ",
+  "predicted_at": "2026-05-04T23:45:40",
+  "logic_version": "v0.0-seed-test",
+  "recommendations": [
+    {
+      "mark": "◎",
+      "rank": 1,
+      "horse_id": "0725110402",
+      "horse_name": "エイシンアニーモ",
+      "score": 78.13,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    },
+    {
+      "mark": "○",
+      "rank": 2,
+      "horse_id": "0725110408",
+      "horse_name": "カーボナード",
+      "score": 76.44,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    },
+    {
+      "mark": "▲",
+      "rank": 3,
+      "horse_id": "0625110407",
+      "horse_name": "トゥザヒロイン",
+      "score": 70.82,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    },
+    {
+      "mark": "△",
+      "rank": 4,
+      "horse_id": "0625110409",
+      "horse_name": "マコタイガ",
+      "score": 63.74,
+      "reason": "[seed test] ランダム選定 + 順位バイアス"
+    }
+  ]
+}
