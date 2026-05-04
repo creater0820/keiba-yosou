@@ -70,12 +70,20 @@ with st.sidebar:
     st.divider()
     st.subheader("📊 過去データ")
 
+    # データ出所ラベルの日本語化テーブル
+    SOURCE_LABEL = {
+        "parquet": "本番(Parquet)",
+        "csv_sample": "サンプル(CSV)",
+    }
+
     # 過去データの読み込み(失敗してもアプリは続行)
     try:
         historical = get_historical()
-        # データの出所を明示(本番Parquet or 開発用CSVサンプル)
-        source_label = "本番(Parquet)" if historical.source == "parquet" else "サンプル(CSV)"
-        st.metric("データ種別", source_label)
+        # テーブルごとにデータ出所を表示(混在運用に対応)
+        # 例: races=本番、horses=サンプル、pedigree=サンプル
+        for table_name, src in historical.sources.items():
+            st.metric(table_name, SOURCE_LABEL.get(src, src))
+        st.divider()
         st.metric("過去レース数", f"{historical.races['race_id'].nunique():,} レース")
         st.metric("登録馬数", f"{len(historical.horses):,} 頭")
     except FileNotFoundError as e:

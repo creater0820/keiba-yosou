@@ -36,40 +36,49 @@ class HistoricalData:
     races: pd.DataFrame      # 過去レース結果(行=馬1頭の1出走)
     horses: pd.DataFrame     # 過去登録馬(行=馬1頭)
     pedigree: pd.DataFrame   # 血統情報(行=馬1頭)
-    source: str              # "parquet" または "csv_sample" のいずれか(UI表示用)
+    # 各テーブルのデータ出所を独立に持つ。
+    # 例: {"races": "parquet", "horses": "csv_sample", "pedigree": "csv_sample"}
+    sources: dict[str, str]
+
+
+def _load_one_table(table_name: str) -> tuple[pd.DataFrame, str]:
+    """
+    1テーブル分を読み込む。
+    本番Parquet (data/historical/{name}.parquet) があればそれを、
+    無ければサンプルCSV (data/samples/sample_historical/{name}.csv) を返す。
+    どちらも無ければ FileNotFoundError。
+    """
+    parquet_path = HISTORICAL_DIR / f"{table_name}.parquet"
+    csv_path = SAMPLE_HISTORICAL_DIR / f"{table_name}.csv"
+
+    if parquet_path.exists():
+        return pd.read_parquet(parquet_path), "parquet"
+    if csv_path.exists():
+        return pd.read_csv(csv_path), "csv_sample"
+
+    raise FileNotFoundError(
+        f"{table_name} のデータが見つかりません。"
+        f" {parquet_path} または {csv_path} のいずれかを配置してください。"
+    )
 
 
 def load_historical_data() -> HistoricalData:
     """
-    過去データを読み込む。
-
-    Parquet (本番) → CSV サンプル (開発) の順に試し、見つかったほうを返す。
-    どちらも無ければ FileNotFoundError を送出する。
+    過去データを読み込む。テーブルごとに Parquet / CSV を独立に選択する。
+    例えば races のみ本番Parquet、horses/pedigree はサンプルCSV、という混在運用が可能。
     """
-    # まず本番Parquetが3つ揃っているかチェック
-    parquet_paths = {name: HISTORICAL_DIR / f"{name}.parquet" for name in HISTORICAL_TABLES}
-    if all(p.exists() for p in parquet_paths.values()):
-        return HistoricalData(
-            races=pd.read_parquet(parquet_paths["races"]),
-            horses=pd.read_parquet(parquet_paths["horses"]),
-            pedigree=pd.read_parquet(parquet_paths["pedigree"]),
-            source="parquet",
-        )
+    tables: dict[str, pd.DataFrame] = {}
+    sources: dict[str, str] = {}
+    for name in HISTORICAL_TABLES:
+        df, src = _load_one_table(name)
+        tables[name] = df
+        sources[name] = src
 
-    # フォールバック: 開発用サンプルCSV
-    csv_paths = {name: SAMPLE_HISTORICAL_DIR / f"{name}.csv" for name in HISTORICAL_TABLES}
-    if all(p.exists() for p in csv_paths.values()):
-        return HistoricalData(
-            races=pd.read_csv(csv_paths["races"]),
-            horses=pd.read_csv(csv_paths["horses"]),
-            pedigree=pd.read_csv(csv_paths["pedigree"]),
-            source="csv_sample",
-        )
-
-    raise FileNotFoundError(
-        "過去データが見つかりません。"
-        f" {HISTORICAL_DIR}/ に Parquet を配置するか、"
-        f" {SAMPLE_HISTORICAL_DIR}/ にサンプルCSVを配置してください。"
+    return HistoricalData(
+        races=tables["races"],
+        horses=tables["horses"],
+        pedigree=tables["pedigree"],
+        sources=sources,
     )
 
 
