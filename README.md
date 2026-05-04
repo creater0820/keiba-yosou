@@ -5,7 +5,7 @@ JRA中央競馬の予想を自動化する Streamlit Web アプリ。
 
 ---
 
-## 👨‍🦳 利用者(お父様)向け使い方
+## 👨‍🦳 利用者向け使い方
 
 ### 1. アプリを開く
 お知らせした URL(例: `https://keiba-yosou.streamlit.app/`)をブラウザのお気に入りに登録して、当日アクセスする。
@@ -32,7 +32,7 @@ JRA-VAN DataLab(または TARGET frontier JV)から、
 
 ---
 
-## 🛠 開発者(Yasu)向け
+## 🛠 開発者向け
 
 ### セットアップ
 
