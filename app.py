@@ -16,6 +16,7 @@ Streamlit エントリーポイント。
 from __future__ import annotations
 
 import io
+import zipfile
 
 import pandas as pd
 import streamlit as st
@@ -28,6 +29,10 @@ from data_loader import (
     validate_race_card,
 )
 from prediction_logic import HorsePrediction, predict_all_races
+from utils.prediction_io import build_prediction_dict, serialize_prediction
+
+# 予想ロジックの世代タグ。本ロジック差し替え時はここを上げる(精度履歴の比較に使う)。
+LOGIC_VERSION = "v1.0-mvp"
 
 # =====================================================================
 # 画面全体の設定
@@ -197,15 +202,62 @@ if race_card_df is not None and historical is not None:
                 })
         download_df = pd.DataFrame(download_rows)
 
-        # ===== CSVダウンロードボタン =====
+        # ===== ダウンロードボタン群(CSV と JSON ZIP) =====
+        dl_col1, dl_col2 = st.columns(2)
+
+        # --- CSV(全レース1ファイル、Excel互換 BOM 付き UTF-8) ---
         csv_buffer = io.StringIO()
-        # Excel で開いた時に文字化けしないよう BOM 付き UTF-8 で出力
         download_df.to_csv(csv_buffer, index=False)
-        st.download_button(
-            label="📥 予想結果を CSV でダウンロード",
-            data=("﻿" + csv_buffer.getvalue()).encode("utf-8"),
-            file_name="prediction_results.csv",
-            mime="text/csv",
+        with dl_col1:
+            st.download_button(
+                label="📥 予想結果を CSV でダウンロード",
+                data=("﻿" + csv_buffer.getvalue()).encode("utf-8"),
+                file_name="prediction_results.csv",
+                mime="text/csv",
+            )
+
+        # --- JSON ZIP(レース1本=1ファイル、predictions/ にコミットする運用) ---
+        # Streamlit Cloud には永続ストレージが無いため、
+        # 「予想を保存」 = 「ブラウザに ZIP ダウンロード」 → 後で開発者が
+        # predictions/ に展開して git commit、というワークフロー。
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for race_id, preds in results.items():
+                race_info_row = race_card_df[race_card_df["race_id"] == race_id].iloc[0]
+                race_info = {
+                    "race_id": race_id,
+                    "race_date": str(race_info_row.get("race_date", "")),
+                    "racecourse": str(race_info_row.get("racecourse", "")),
+                    "race_number": race_info_row.get("race_number", 0),
+                    "race_name": str(race_info_row.get("race_name", "")),
+                    "distance": race_info_row.get("distance", 0),
+                    "surface": str(race_info_row.get("surface", "")),
+                }
+                # 印付き上位馬のみ保存(印のないその他の馬はノイズになるため除外)
+                marked_preds = [p for p in preds if p.mark]
+                pred_dict = build_prediction_dict(race_info, marked_preds, LOGIC_VERSION)
+                # ZIP内のファイル名は predictions/ 直下に置けば良い形式
+                zip_filename = (
+                    f"{pred_dict['race_date']}_{pred_dict['racecourse']}_"
+                    f"{int(pred_dict['race_number']):02d}R.json"
+                )
+                zf.writestr(zip_filename, serialize_prediction(pred_dict))
+
+        with dl_col2:
+            st.download_button(
+                label="💾 予想を保存(JSON ZIP)",
+                data=zip_buffer.getvalue(),
+                file_name=f"predictions_{LOGIC_VERSION}.zip",
+                mime="application/zip",
+                help="ZIP内の各JSONを predictions/ に配置して git push すると、的中履歴ダッシュボードに反映されます。",
+            )
+
+        st.info(
+            "💡 **予想を履歴に追加する手順**\n"
+            "1. 上の「💾 予想を保存」で ZIP をダウンロード\n"
+            "2. ダウンロードした ZIP を Yasu(開発者)に送信\n"
+            "3. 開発者が `predictions/` フォルダに展開して `git push`\n"
+            "4. Streamlit Cloud が自動再デプロイされ、的中履歴ページに反映されます"
         )
 
         # ===== レースごとの結果表示 =====

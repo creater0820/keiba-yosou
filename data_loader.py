@@ -19,6 +19,10 @@ from typing import IO
 
 import pandas as pd
 
+# 予想 JSON の読み込み関数は utils/prediction_io.py に実装している。
+# data_loader.load_predictions として呼べるよう、ここで再エクスポートする。
+from utils.prediction_io import load_predictions  # noqa: F401  (re-export)
+
 # ===== 過去データ読み込み =====
 
 # 本番データ(リポジトリ同梱、Parquet形式)の置き場
