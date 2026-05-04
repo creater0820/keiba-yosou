@@ -44,9 +44,20 @@ st.set_page_config(
 # =====================================================================
 # Streamlit のキャッシュ: @st.cache_data を付けた関数は、引数が同じなら
 # 結果を再利用するため、ファイル読み込みを毎回やり直さない(初回起動の高速化)
+#
+# _schema_version は HistoricalData の構造を変えた時にキャッシュを
+# 強制的に作り直すための「キャッシュ世代」バージョン。
+# Streamlit Cloud の再デプロイでは pickle キャッシュが残り、旧スキーマの
+# 物体(.source(str)を持ち .sources(dict)を持たない)が返ってくる事故が
+# 起きるため、スキーマを変えたらここの値を v2 → v3 のように手で上げる。
+HISTORICAL_DATA_SCHEMA_VERSION = "v2-per-table-sources"
+
+
 @st.cache_data(show_spinner="過去データを読み込み中…")
-def get_historical() -> HistoricalData:
-    """過去データの読み込み(キャッシュ済み)"""
+def get_historical(_schema_version: str = HISTORICAL_DATA_SCHEMA_VERSION) -> HistoricalData:
+    """過去データの読み込み(キャッシュ済み)。
+    _schema_version はキャッシュキーを世代管理するためだけの引数で、
+    値を変えると同名関数でも別キャッシュとして扱われる。"""
     return load_historical_data()
 
 
