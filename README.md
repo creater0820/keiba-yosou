@@ -54,22 +54,13 @@ streamlit run app.py
 
 ```
 keiba-yosou/
-├── app.py                          # Streamlit メインページ (UI)
+├── app.py                          # Streamlit エントリーポイント (UI)
 ├── prediction_logic.py             # 予想ロジック(差し替え可能)
 ├── data_loader.py                  # データ読み込み・バリデーション
 ├── requirements.txt                # 依存パッケージ
 ├── CLAUDE.md                       # Claude Code 用プロジェクト指示
 ├── README.md                       # このファイル
 ├── .streamlit/config.toml          # Streamlit 設定(テーマ・上限サイズ)
-├── pages/                          # Streamlit マルチページ(サイドバーに自動追加)
-│   └── 02_的中履歴.py              # 的中履歴ダッシュボード
-├── utils/
-│   ├── prediction_io.py            # 予想 JSON の入出力
-│   └── hit_matching.py             # 予想 × 実結果 の突合
-├── predictions/                    # 予想記録 (JSON, リポジトリ同梱・追記運用)
-│   └── YYYY-MM-DD_場名_RR.json
-├── hit_history/                    # 突合済み履歴
-│   └── results.parquet
 ├── data/
 │   ├── historical/                 # 本番過去データ (Parquet, リポジトリ同梱)
 │   │   └── races.parquet           # JV-Link 由来。horses/pedigree は今後追加
@@ -81,8 +72,7 @@ keiba-yosou/
 │   └── UPDATE_DATA.md              # 過去データ差し替え手順
 ├── scripts/
 │   ├── generate_samples.py         # サンプルデータ再生成
-│   ├── csv_to_parquet.py           # 受領CSV → Parquet 変換
-│   └── seed_test_predictions.py    # 動作確認用ダミー予想生成
+│   └── csv_to_parquet.py           # 受領CSV → Parquet 変換
 └── tests/                          # ロジック単体テスト(MVP後追加予定)
 ```
 
@@ -146,66 +136,6 @@ f. デプロイ完了後、`https://<your-app-name>.streamlit.app/` で公開さ
 要約: 受領した CSV を `data/raw/` に置き、
 `python scripts/csv_to_parquet.py` を実行して
 `data/historical/*.parquet` を生成 → commit & push。
-
-### 予想履歴の運用
-
-予想精度を測る基盤として、各予想を JSON として `predictions/` にコミットし、
-過去データ更新時に自動で実結果と突合 → `hit_history/results.parquet` に永続化、
-というフローで運用する。Streamlit Cloud は永続ストレージを持たないため、
-**ブラウザダウンロード → 手動コミット**という二段階を踏む。
-
-#### 運用フロー
-
-1. お父様がメインページで予想実行 → 「💾 **予想を保存**」で ZIP をダウンロード
-2. ダウンロードした ZIP を LINE 等で開発者(Yasu)に送信
-3. 開発者が `predictions/` にファイルを展開してコミット:
-   ```bash
-   cd ~/dev/keiba-yosou
-   unzip ~/Downloads/predictions_v1.0-mvp.zip -d predictions/
-   git add predictions/
-   git commit -m "predictions: add YYYY-MM-DD picks"
-   git push
-   ```
-4. Streamlit Cloud が自動再デプロイ → 「📊 **的中履歴**」ページに反映
-5. 過去データ更新時(`csv_to_parquet.py` 実行 → push)に、結果が出ていなかった
-   レースの突合が自動で進む
-
-#### サンプルデータの投入(動作確認用)
-
-```bash
-python scripts/seed_test_predictions.py
-```
-
-`data/historical/races.parquet` から5レースをランダム選択して、
-ヒューリスティックでサンプル予想を生成 → `predictions/` に書き出す。
-これで的中履歴ダッシュボードが空にならず動作確認できる。
-
-#### 予想 JSON のスキーマ
-
-```json
-{
-  "race_id": "R20260503-東11",
-  "race_date": "2026-05-03",
-  "racecourse": "東京",
-  "race_number": 11,
-  "race_name": "...",
-  "distance": 1600,
-  "surface": "芝",
-  "predicted_at": "2026-05-03T10:23:45",
-  "logic_version": "v1.0-mvp",
-  "recommendations": [
-    {"mark": "◎", "rank": 1, "horse_id": "...", "horse_name": "...",
-     "score": 85.2, "reason": "..."},
-    {"mark": "○", "rank": 2, ...},
-    {"mark": "▲", "rank": 3, ...},
-    {"mark": "△", "rank": 4, ...}
-  ]
-}
-```
-
-`logic_version` は `app.py` 内の `LOGIC_VERSION` 定数。
-ロジック差し替え時にここを上げると、ダッシュボードでロジック世代別の
-精度比較ができる。
 
 ### 開発ルール
 
