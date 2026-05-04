@@ -53,8 +53,9 @@ Thumbs.db
 .claude/settings.local.json
 
 # ===== プロジェクト固有 =====
-# 本番過去データは別途配布(初期はサンプルデータのみコミット)
-data/historical/*.parquet
+# 本番過去データの生CSV(JV-Link 出力)はリポジトリに含めない。
+# data/historical/*.parquet は変換後成果物としてコミットする。
+data/raw/
 
 # ユーザがアップロードした当日データ
 data/uploads/*
