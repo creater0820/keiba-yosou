@@ -154,17 +154,46 @@ def render_predictions_section(
 
     # ----- レースごとの結果表示 -----
     st.subheader("レースごとの予想")
-    for race_id, preds in display_predictions.items():
+    st.caption(
+        "発走時刻は JRA 標準スケジュールから推定したもので、実際の発走時刻とは "
+        "±10 分前後ズレることがあります。"
+    )
+
+    # 場 → 時刻 → R の自然順で並べ替える
+    # post_time が無いレース(列欠損 or 範囲外)は最後に回す
+    def _race_sort_key(race_id: str) -> tuple:
+        row = display_df[display_df["race_id"] == race_id].iloc[0]
+        course = str(row.get("racecourse", "") or "")
+        time_str = str(row.get("post_time", "") or "")
+        # 空文字は最後に来るよう "99:99" でフォールバック
+        time_key = time_str if time_str else "99:99"
+        try:
+            rno = int(row.get("race_number") or 99)
+        except (ValueError, TypeError):
+            rno = 99
+        return (course, time_key, rno)
+
+    sorted_race_ids = sorted(display_predictions.keys(), key=_race_sort_key)
+
+    for race_id in sorted_race_ids:
+        preds = display_predictions[race_id]
         race_info_row = display_df[display_df["race_id"] == race_id].iloc[0]
+
+        # 発走時刻(推定)を取り出してタイトルに添える
+        post_time = str(race_info_row.get("post_time", "") or "").strip()
+        post_time_part = f"  {post_time}発走" if post_time else ""
+
         # 本命馬(◎)を 1 頭抽出してタイトルにプレビュー表示
         honmei_pred = next((p for p in preds if p.mark == "◎"), None)
         honmei_text = f" — ◎ {honmei_pred.horse_name}" if honmei_pred is not None else ""
+
         title = (
             f"【{race_info_row.get('racecourse', '')} "
             f"{race_info_row.get('race_number', '')}R】 "
             f"{race_info_row.get('race_name', '')} "
             f"{race_info_row.get('distance', '')}m "
             f"{race_info_row.get('surface', '')}"
+            f"{post_time_part}"
             f"{honmei_text}"
         )
         # 既定で閉じる(クリックで展開)。スクロール量削減のため。
