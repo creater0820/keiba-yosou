@@ -255,19 +255,19 @@ def render_recent_runs_matrix(
     parts: list[str] = [_MATRIX_CSS, '<table class="recent-runs-matrix">']
     parts.append(
         "<thead><tr><th></th>"
-        "<th>5走前</th><th>4走前</th><th>3走前</th><th>2走前</th><th>前走</th>"
+        "<th>前走</th><th>2走前</th><th>3走前</th><th>4走前</th><th>5走前</th>"
         "</tr></thead><tbody>"
     )
 
     for hid, mark, hn, name, _score in horse_meta:
         runs = history.get(hid, [None] * 5)
-        # runs は [前走, 2走前, ..., 5走前] の順なので、表示順 [5走前, 4走前, ..., 前走] に反転
-        runs_display = list(reversed(runs))
+        # runs は [前走, 2走前, ..., 5走前] の直近順。表示も同じく左=前走、右=5走前。
+        # 新聞・専門紙の戦歴と同じ並びで「直近の調子」を左端で素早く読める。
 
         label = _format_horse_label(mark, hn, name)
         parts.append("<tr>")
         parts.append(f'<td class="horse-label">{label}</td>')
-        for run in runs_display:
+        for run in runs:
             parts.append(_build_run_cell(run, target_surface, target_distance))
         parts.append("</tr>")
 
