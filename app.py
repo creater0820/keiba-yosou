@@ -62,53 +62,14 @@ def get_historical(_schema_version: str = HISTORICAL_DATA_SCHEMA_VERSION) -> His
 
 
 # =====================================================================
-# サイドバー: アプリ説明 + 過去データの統計
+# メイン領域 上部: タイトル + 出馬表アップロード
 # =====================================================================
-with st.sidebar:
-    st.title("🏇 競馬予想アプリ")
-    st.caption("JRA中央競馬・個人利用専用")
-
-    st.markdown(
-        """
-        ### 使い方
-        1. 当日の出馬表 CSV をアップロード
-        2. 「予想実行」ボタンを押す
-        3. レースごとに ◎○▲△ を確認
-        4. 必要なら結果を CSV でダウンロード
-        """
-    )
-
-    st.divider()
-    st.subheader("📊 過去データ")
-
-    # データ出所ラベルの日本語化テーブル
-    SOURCE_LABEL = {
-        "parquet": "本番(Parquet)",
-        "csv_sample": "サンプル(CSV)",
-    }
-
-    # 過去データの読み込み(失敗してもアプリは続行)
-    try:
-        historical = get_historical()
-        # テーブルごとにデータ出所を表示(混在運用に対応)
-        # 例: races=本番、horses=サンプル、pedigree=サンプル
-        for table_name, src in historical.sources.items():
-            st.metric(table_name, SOURCE_LABEL.get(src, src))
-        st.divider()
-        st.metric("過去レース数", f"{historical.races['race_id'].nunique():,} レース")
-        st.metric("登録馬数", f"{len(historical.horses):,} 頭")
-    except FileNotFoundError as e:
-        historical = None
-        st.error(str(e))
-
-
-# =====================================================================
-# メイン領域
-# =====================================================================
+# 出馬表を先に読み込んでおく。サイドバーの「競馬場フィルタ」が出馬表に含まれる
+# 場の集合に依存して動的に選択肢を出すため、サイドバー描画前に race_card_df を
+# 確定させる必要がある。
 st.title("🏇 競馬予想アプリ")
 st.caption("当日の出馬表 CSV をアップロードして「予想実行」を押してください。")
 
-# --- 出馬表アップロード ------------------------------------------------
 uploaded = st.file_uploader(
     "当日出馬表 CSV をアップロード",
     type=["csv"],
@@ -138,6 +99,64 @@ elif use_sample:
         source_name = "sample_race_card.csv"
     except Exception as e:
         st.error(f"サンプル CSV の読み込みに失敗しました: {e}")
+
+
+# =====================================================================
+# サイドバー: アプリ説明 + 競馬場フィルタ + 過去データ統計
+# =====================================================================
+with st.sidebar:
+    st.title("🏇 競馬予想アプリ")
+    st.caption("JRA中央競馬・個人利用専用")
+
+    st.markdown(
+        """
+        ### 使い方
+        1. 当日の出馬表 CSV をアップロード
+        2. 「予想実行」ボタンを押す
+        3. レースごとに ◎○▲△ を確認
+        4. 必要なら結果を CSV でダウンロード
+        """
+    )
+
+    # ----- 競馬場フィルタ -----
+    # 出馬表がアップロード済みのときだけ表示。当日 CSV に登場する場のみを
+    # 動的に選択肢にする(他場の枠は出さない)。
+    if race_card_df is not None and "racecourse" in race_card_df.columns:
+        st.divider()
+        st.subheader("📍 競馬場フィルタ")
+        course_options = ["全場"] + sorted(race_card_df["racecourse"].dropna().unique().tolist())
+        selected_course = st.radio(
+            "表示する競馬場",
+            course_options,
+            index=0,
+            key="course_filter",
+        )
+    else:
+        # 出馬表が無い時のデフォルト(後段で「全場」相当として扱う)
+        selected_course = "全場"
+
+    # ----- 過去データ統計 -----
+    st.divider()
+    st.subheader("📊 過去データ")
+
+    # データ出所ラベルの日本語化テーブル
+    SOURCE_LABEL = {
+        "parquet": "本番(Parquet)",
+        "csv_sample": "サンプル(CSV)",
+    }
+
+    # 過去データの読み込み(失敗してもアプリは続行)
+    try:
+        historical = get_historical()
+        # テーブルごとにデータ出所を表示(混在運用に対応)
+        for table_name, src in historical.sources.items():
+            st.metric(table_name, SOURCE_LABEL.get(src, src))
+        st.divider()
+        st.metric("過去レース数", f"{historical.races['race_id'].nunique():,} レース")
+        st.metric("登録馬数", f"{len(historical.horses):,} 頭")
+    except FileNotFoundError as e:
+        historical = None
+        st.error(str(e))
 
 
 # =====================================================================
