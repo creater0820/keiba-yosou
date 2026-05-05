@@ -77,6 +77,9 @@ _MATRIX_CSS = """
 /* サーフェス一致マーカー: ★(同 芝/ダ) / ★★(同 芝/ダ + 距離±200m) */
 .recent-runs-matrix .surface-match::after          { content: " ★";  color: #FFD700; }
 .recent-runs-matrix .surface-distance-match::after { content: " ★★"; color: #FFD700; }
+/* 上がり3F の評価別文字スタイル(33秒台前半=好末脚 / 35秒台以降=遅い) */
+.recent-runs-matrix .last3f-fast { font-weight: bold; color: #66BB6A; }
+.recent-runs-matrix .last3f-slow { color: #999;      font-weight: 300; }
 /* 凡例タグ */
 .recent-runs-matrix-legend {
     font-size: 11px;
@@ -182,16 +185,23 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
 
     # ----- 上がり3F -----
     last_3f = run.get("last_3f")
+    last3f_cls = ""
     if last_3f is None or pd.isna(last_3f):
         last3f_str = "──"
     else:
-        last3f_str = f"{float(last_3f):.1f}"
+        f = float(last_3f)
+        last3f_str = f"{f:.1f}"
+        if f < 33.5:
+            last3f_cls = "last3f-fast"   # 33秒台前半 → 好末脚(太字緑)
+        elif f >= 35.0:
+            last3f_cls = "last3f-slow"   # 35秒以上  → 鈍い(淡灰)
+    last3f_class_attr = f"last3f {last3f_cls}".rstrip()
 
     return (
         '<td class="run-cell">'
         f'<div class="position {pos_cls}">{html.escape(pos_str)}</div>'
         f'<div class="{course_class_attr}">{html.escape(course_str)}</div>'
-        f'<div class="last3f">{html.escape(last3f_str)}</div>'
+        f'<div class="{last3f_class_attr}">{html.escape(last3f_str)}</div>'
         "</td>"
     )
 
