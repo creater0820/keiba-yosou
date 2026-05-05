@@ -39,9 +39,12 @@ JV_LINK_EXPECTED_COLS = 52
 #   [15]    年齢
 #   [16]    騎手
 #   [17]    斤量
-#   [18]    馬番
+#   [18]    出走頭数(全行同値)
 #   [19]    着順(2桁ゼロ埋め文字列、例 '01' = 1着)
+#   [20]    馬番(出走番号、1〜N、レース内ユニーク)  ← horse_number
+#   [21]    馬番(同 [20] の複製、JV-Link が冗長に出力)
 #   [22-23] 着差・着差秒
+#   [24]    別の 1..N 置換(おそらく単勝人気順位)
 #   [25]    走破タイム(秒、例: 70.3 = 1分10秒3)
 #   [26]    走破タイム(別表現、1103 = 1分10秒3)
 #   [27-31] 時計指数・通過順
@@ -65,6 +68,10 @@ RACES_COL: dict[str, int] = {
     "horse_name":         13,
     "jockey":             16,
     "finishing_position": 19,
+    # 馬番は [24] が 99.58% で 1..N の置換になる(残りはエンコーディング由来の
+    # 0..N-1 など、per-race offset 正規化で吸収する)。
+    # [20] は古い形式で 馬番 のことも、[24] と異なる別の順位のこともあるので採用しない。
+    "horse_number":       24,
     "time_seconds":       25,
     "last_3f":            32,
     "weight":             33,
@@ -117,8 +124,8 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
 
     返す列: race_id, race_date, racecourse, race_number, race_name,
             distance, surface, going, finishing_position,
-            horse_id, horse_name, jockey, trainer, weight, weight_change,
-            time, last_3f, popularity, odds
+            horse_number, horse_id, horse_name, jockey, trainer, weight,
+            weight_change, time, last_3f, popularity, odds
     """
     if raw.shape[1] != JV_LINK_EXPECTED_COLS:
         raise ValueError(
@@ -158,6 +165,27 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
     # 馬登録番号: 10桁ゼロ埋め(JRA-VAN は10桁が標準)
     horse_id = col("horse_id").str.zfill(10)
 
+    # 馬番(horse_number)の per-race offset 正規化:
+    # JV-Link [24] は概ね 1..N の置換だが、一部のレース(主に古いデータ)では
+    # 0..N-1 の 0-based エンコーディングになっている。レース毎の min を引いて
+    # +1 することでどちらも 1..N の表現に揃える。
+    # 範囲外の値(欠損や明らかな破損)は <NA> にする。
+    race_group_key = (
+        raw[RACES_COL["year"]].fillna("").astype(str) + "-"
+        + raw[RACES_COL["month"]].fillna("").astype(str) + "-"
+        + raw[RACES_COL["day"]].fillna("").astype(str) + "-"
+        + raw[RACES_COL["racecourse"]].fillna("").astype(str) + "-"
+        + raw[RACES_COL["race_number"]].fillna("").astype(str)
+    )
+    hn_raw = pd.to_numeric(col("horse_number"), errors="coerce")
+    # transform を使うとグループ集約値が元と同じ Index・shape で broadcast される
+    hn_min_per_race = hn_raw.groupby(race_group_key).transform("min")
+    field_size = hn_raw.groupby(race_group_key).transform("size")
+    hn_normalized = hn_raw - hn_min_per_race + 1
+    # 1..N の範囲に収まらない値は欠損として扱う
+    hn_valid = (hn_normalized >= 1) & (hn_normalized <= field_size)
+    horse_number = hn_normalized.where(hn_valid).round().astype("Int64")
+
     return pd.DataFrame({
         "race_id":            race_id,
         "race_date":          race_date.dt.strftime("%Y-%m-%d"),
@@ -168,6 +196,7 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
         "surface":            col("surface"),
         "going":              col("going"),
         "finishing_position": to_nullable_int(col("finishing_position")),
+        "horse_number":       horse_number,
         "horse_id":           horse_id,
         "horse_name":         col("horse_name"),
         "jockey":             col("jockey"),
