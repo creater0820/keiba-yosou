@@ -87,3 +87,64 @@ def get_recent_n_runs(
     return get_recent_runs_for_race(
         (str(horse_id),), target_iso, historical_df, n=n,
     )[str(horse_id)]
+
+
+# =====================================================================
+# 脚質判定(本ロジック v1.0 の Step 1 / Phase 2 で使う)
+# =====================================================================
+# CLAUDE.md「推奨馬選定ロジック(本ロジック v1.0)/ 脚質の判定基準」より:
+#   過去5走の初角(1コーナー)通過順位の平均で判定:
+#     平均 1〜3番手   → 逃げ
+#     平均 4〜6番手   → 先行
+#     平均 7〜10番手  → 差し
+#     平均 11番手以下 → 追込
+#     過去走3走未満   → 不明(暫定で先行扱い)
+
+RUNNING_STYLES = ("逃げ", "先行", "差し", "追込", "不明(先行扱い)")
+
+
+def determine_running_style(past_runs: list[dict | None]) -> str:
+    """
+    過去 N 走(get_recent_n_runs の戻り値想定、直近順)から脚質を判定する。
+
+    引数:
+        past_runs: [前走, 2走前, ..., N走前] のリスト。各要素は dict or None。
+                   各 dict は corner_1 を含む historical の1行をそのまま想定。
+
+    戻り値:
+        "逃げ" / "先行" / "差し" / "追込" / "不明(先行扱い)" のいずれか。
+
+    判定ロジック:
+        - 直近5走から corner_1 が有効値(NaN以外)のものだけ拾う
+        - 拾えたサンプル数 < 3 → "不明(先行扱い)"
+        - それ以上なら平均値で 4 区分(仕様書通り)
+    """
+    if not past_runs:
+        return "不明(先行扱い)"
+
+    # 直近5走に絞る(余分があっても先頭5件)
+    head5 = past_runs[:5]
+
+    valid_corners: list[float] = []
+    for r in head5:
+        if r is None:
+            continue
+        c1 = r.get("corner_1")
+        if c1 is None or pd.isna(c1):
+            continue
+        try:
+            valid_corners.append(float(c1))
+        except (ValueError, TypeError):
+            continue
+
+    if len(valid_corners) < 3:
+        return "不明(先行扱い)"
+
+    avg = sum(valid_corners) / len(valid_corners)
+    if avg <= 3:
+        return "逃げ"
+    if avg <= 6:
+        return "先行"
+    if avg <= 10:
+        return "差し"
+    return "追込"
