@@ -19,6 +19,7 @@ import datetime as dt
 import hashlib
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from data_loader import (
@@ -75,6 +76,75 @@ def _parse_course_from_label(label: str) -> str:
 # =====================================================================
 # 描画ヘルパ
 # =====================================================================
+# スコア横棒グラフの色分け(◎○▲△ + 印なし正/負)
+_MARK_COLORS = {
+    "◎": "#FFD700",   # 金
+    "○": "#C0C0C0",   # 銀
+    "▲": "#CD7F32",   # 銅
+    "△": "#A0D8EF",   # 薄水色
+}
+_NO_MARK_POSITIVE = "#4CAF50"   # 緑
+_NO_MARK_NEGATIVE = "#9E9E9E"   # 灰
+
+
+def _build_score_chart(preds, fmt_hn):
+    """
+    1レース分の全頭スコアを横棒グラフ化する Plotly Figure を返す。
+
+    引数:
+        preds: list[HorsePrediction] — 1レースの全推奨予測
+        fmt_hn: callable(horse_id: str) -> str
+                馬番を表示用文字列にする関数(欠損は "—")
+
+    色分け:
+        ◎=金、○=銀、▲=銅、△=薄水色、印なし正=緑、印なし負=灰
+    """
+    rows = []
+    for p in preds:
+        hn_str = fmt_hn(p.horse_id)
+        if p.mark in _MARK_COLORS:
+            color = _MARK_COLORS[p.mark]
+        elif p.score >= 0:
+            color = _NO_MARK_POSITIVE
+        else:
+            color = _NO_MARK_NEGATIVE
+        # 印が無い行も全角スペースで桁を揃え、Y軸ラベルを縦方向に綺麗に並べる
+        mark_part = p.mark if p.mark else "  "
+        label = f"{mark_part} {hn_str:>2} {p.horse_name}"
+        rows.append({"label": label, "score": float(p.score), "color": color})
+
+    # Plotly の orientation='h' は「データ最初の行」が「下」に来るので、
+    # スコア昇順にしておくと見た目では「上が高スコア」になる
+    chart_df = pd.DataFrame(rows).sort_values("score", ascending=True)
+
+    # 高さ: 出走頭数 × 25px(動的)、最低 200px は確保して描画破綻を防ぐ
+    height = max(200, len(preds) * 25 + 60)
+
+    fig = px.bar(
+        chart_df,
+        x="score",
+        y="label",
+        orientation="h",
+        height=height,
+    )
+    fig.update_traces(
+        marker_color=chart_df["color"].tolist(),
+        texttemplate="%{x:.1f}",
+        textposition="outside",
+        cliponaxis=False,    # ラベルが軸外でも描画(端で見切れない)
+    )
+    fig.update_layout(
+        margin=dict(t=20, b=20, l=10, r=40),
+        xaxis_title="スコア",
+        yaxis_title=None,
+        showlegend=False,
+        bargap=0.25,
+    )
+    # 0 のところに点線基準線
+    fig.add_vline(x=0, line_dash="dot", line_color="gray", line_width=1)
+    return fig
+
+
 def render_predictions_section(
     *,
     all_predictions: dict[str, list[HorsePrediction]],
@@ -211,6 +281,11 @@ def render_predictions_section(
             if top_rows:
                 st.markdown("**推奨馬(上位4頭)**")
                 st.dataframe(pd.DataFrame(top_rows), hide_index=True, use_container_width=True)
+
+            # 全頭スコアの横棒グラフ(◎○▲△ がどれくらい優位か視覚化)
+            st.markdown("**スコアランキング**")
+            score_fig = _build_score_chart(preds, _fmt_hn)
+            st.plotly_chart(score_fig, use_container_width=True)
 
             st.markdown("**全頭の評価詳細**")
             for p in preds:
