@@ -162,24 +162,36 @@ with st.sidebar:
 # =====================================================================
 # 出馬表のプレビュー & バリデーション
 # =====================================================================
+# サイドバーで選んだ場でフィルタした DataFrame を以後は display_df として扱う。
+# バリデーションだけは元の race_card_df(フィルタ前)に対して行う
+# (列構成不整合は「全場」だろうと「東京のみ」だろうと同じ問題なので)。
 if race_card_df is not None:
-    st.success(f"読み込み完了: {source_name}")
-
-    # 列構成チェック
+    # 列構成チェック(フィルタ前の生データに対して)
     validation = validate_race_card(race_card_df)
     if not validation.ok:
         st.error(validation.message)
         st.stop()  # 列が揃っていなければ予想実行に進ませない
 
-    # 概要メトリクス
-    summary = summarize_race_card(race_card_df)
-    col1, col2 = st.columns(2)
-    col1.metric("レース数", f"{summary['race_count']} レース")
-    col2.metric("出走頭数", f"{summary['horse_count']} 頭")
+    # 競馬場フィルタを適用
+    if selected_course == "全場":
+        display_df = race_card_df
+    else:
+        display_df = race_card_df[race_card_df["racecourse"] == selected_course].copy()
 
-    # 出馬表のプレビュー表(全件表示は重いので先頭のみ)
+    # 読み込み完了メッセージ(フィルタ状態を併記)
+    course_suffix = f" / {selected_course}のみ表示中" if selected_course != "全場" else ""
+    st.success(f"読み込み完了: {source_name}{course_suffix}")
+
+    # 概要メトリクス
+    summary = summarize_race_card(display_df)
+    col1, col2 = st.columns(2)
+    metric_suffix = f"({selected_course}のみ)" if selected_course != "全場" else ""
+    col1.metric("レース数", f"{summary['race_count']} レース{metric_suffix}")
+    col2.metric("出走頭数", f"{summary['horse_count']} 頭{metric_suffix}")
+
+    # 出馬表のプレビュー表(全件表示は重いので先頭のみ、フィルタ後)
     with st.expander("出馬表プレビュー(先頭20行)"):
-        st.dataframe(race_card_df.head(20), use_container_width=True)
+        st.dataframe(display_df.head(20), use_container_width=True)
 
 
 # =====================================================================
@@ -189,17 +201,17 @@ if race_card_df is not None and historical is not None:
     st.divider()
     if st.button("🎯 予想実行", type="primary", use_container_width=True):
         with st.spinner("予想計算中…"):
-            # 全レース分の予想を一気に計算
-            results = predict_all_races(race_card_df, historical)
+            # フィルタ後の出馬表で予想計算(全場選択時は全レースが対象)
+            results = predict_all_races(display_df, historical)
 
         st.success(f"予想完了({len(results)} レース)")
 
         # 馬番(horse_number)は出馬表側にあるので、horse_id → 馬番 の引きを作る
         # 出馬表に horse_number 列が無ければ空 dict にして、後段で "—" 表示にフォールバック
-        if "horse_number" in race_card_df.columns:
+        if "horse_number" in display_df.columns:
             hn_map = dict(zip(
-                race_card_df["horse_id"].astype(str),
-                race_card_df["horse_number"],
+                display_df["horse_id"].astype(str),
+                display_df["horse_number"],
             ))
         else:
             hn_map = {}
@@ -214,11 +226,10 @@ if race_card_df is not None and historical is not None:
             except (ValueError, TypeError):
                 return str(v)
 
-        # ダウンロード用フラットDataFrameを構築
+        # ダウンロード用フラットDataFrameを構築(フィルタ後のレースのみ)
         download_rows: list[dict] = []
         for race_id, preds in results.items():
-            # race_id ごとの基本情報をマージしておく(レース名・距離・コース等)
-            race_info_row = race_card_df[race_card_df["race_id"] == race_id].iloc[0]
+            race_info_row = display_df[display_df["race_id"] == race_id].iloc[0]
             for pred in preds:
                 download_rows.append({
                     "race_id": race_id,
@@ -238,18 +249,20 @@ if race_card_df is not None and historical is not None:
         download_df = pd.DataFrame(download_rows)
 
         # ===== CSVダウンロードボタン(UTF-8-sig で BOM 付与、Excel互換) =====
+        # ファイル名にもフィルタ状態を反映(全場以外はサフィックス)
         csv_bytes = download_df.to_csv(index=False).encode("utf-8-sig")
+        file_suffix = f"_{selected_course}" if selected_course != "全場" else ""
         st.download_button(
             label="📥 予想結果を CSV でダウンロード",
             data=csv_bytes,
-            file_name="prediction_results.csv",
+            file_name=f"prediction_results{file_suffix}.csv",
             mime="text/csv",
         )
 
-        # ===== レースごとの結果表示 =====
+        # ===== レースごとの結果表示(フィルタ後のレースのみ) =====
         st.subheader("レースごとの予想")
         for race_id, preds in results.items():
-            race_info_row = race_card_df[race_card_df["race_id"] == race_id].iloc[0]
+            race_info_row = display_df[display_df["race_id"] == race_id].iloc[0]
             # エクスパンダのタイトルにレース概要を入れる
             title = (
                 f"【{race_info_row.get('racecourse', '')} "
