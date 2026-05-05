@@ -15,6 +15,7 @@ Streamlit エントリーポイント。
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 
 import pandas as pd
@@ -37,6 +38,38 @@ st.set_page_config(
     page_icon="🏇",
     layout="wide",
 )
+
+
+# =====================================================================
+# サイドバー用ヘルパ(競馬場フィルタのラベル組み立て・パース)
+# =====================================================================
+WEEKDAY_JA = ["月", "火", "水", "木", "金", "土", "日"]
+
+
+def _format_course_label(racecourse: str, dates: list[dt.date]) -> str:
+    """
+    競馬場名 + 開催日リスト → ラジオボタン用ラベル。
+    例: ('京都', [date(2026,5,3)])           → '京都 5/3(日)'
+        ('京都', [date(2026,5,3), date(...)]) → '京都 5/3(日)/5/4(月)'
+    """
+    if not dates:
+        return racecourse
+    sorted_dates = sorted(set(dates))
+    date_strs = [
+        f"{d.month}/{d.day}({WEEKDAY_JA[d.weekday()]})"
+        for d in sorted_dates
+    ]
+    return f"{racecourse} {'/'.join(date_strs)}"
+
+
+def _parse_course_from_label(label: str) -> str:
+    """
+    ラベル文字列から競馬場名だけ取り出す。
+    '京都 5/3(日)' → '京都'、'全場' → '全場'(下流コードがそのまま判定に使えるよう維持)
+    """
+    if label == "全場":
+        return "全場"
+    return label.split(" ", 1)[0]
 
 
 # =====================================================================
@@ -239,17 +272,34 @@ with st.sidebar:
 
     # ----- 競馬場フィルタ -----
     # 出馬表がアップロード済みのときだけ表示。当日 CSV に登場する場のみを
-    # 動的に選択肢にする(他場の枠は出さない)。
+    # 動的に選択肢にし、各場の開催日も併記する(例: '京都 5/3(日)')。
     if race_card_df is not None and "racecourse" in race_card_df.columns:
         st.divider()
         st.subheader("📍 競馬場フィルタ")
-        course_options = ["全場"] + sorted(race_card_df["racecourse"].dropna().unique().tolist())
-        selected_course = st.radio(
+
+        # 場 → 開催日(date のリスト)のマップを作る
+        # race_date は文字列のことも datetime のこともあるので一旦 datetime に揃える
+        _dates_series = pd.to_datetime(race_card_df["race_date"], errors="coerce").dt.date
+        course_dates_map: dict[str, list[dt.date]] = (
+            race_card_df.assign(_d=_dates_series)
+            .dropna(subset=["_d", "racecourse"])
+            .groupby("racecourse")["_d"]
+            .apply(lambda s: sorted(set(s.tolist())))
+            .to_dict()
+        )
+
+        course_options = ["全場"] + [
+            _format_course_label(c, course_dates_map[c])
+            for c in sorted(course_dates_map.keys())
+        ]
+        selected_label = st.radio(
             "表示する競馬場",
             course_options,
             index=0,
             key="course_filter",
         )
+        # 下流のフィルタ判定は単純な場名で行うため、ラベルからパースして取り出す
+        selected_course = _parse_course_from_label(selected_label)
     else:
         # 出馬表が無い時のデフォルト(後段で「全場」相当として扱う)
         selected_course = "全場"
