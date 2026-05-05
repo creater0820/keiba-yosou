@@ -77,12 +77,9 @@ uploaded = st.file_uploader(
     help="JV-Link または TARGET frontier JV からエクスポートした CSV を想定。",
 )
 
-# 開発用: サンプルファイルを使ってお試しできるトグル
-use_sample = st.toggle(
-    "サンプル出馬表で試す(開発用)",
-    value=False,
-    help="data/samples/sample_race_card.csv を使って動作確認します。",
-)
+# サンプルモードのプレースホルダ(次コミットでブランチごと撤去)。
+# トグル UI を消した今、この変数は常に False。
+use_sample = False
 
 # DataFrame に変換するソース(ユーザのアップロード優先、無ければサンプル)
 race_card_df: pd.DataFrame | None = None
