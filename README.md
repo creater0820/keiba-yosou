@@ -137,6 +137,29 @@ f. デプロイ完了後、`https://<your-app-name>.streamlit.app/` で公開さ
 `python scripts/csv_to_parquet.py` を実行して
 `data/historical/*.parquet` を生成 → commit & push。
 
+### CSV エンコーディング規約
+
+入力は柔軟、**出力は UTF-8-sig で統一**、というポリシー:
+
+| 種別 | 規約 |
+|---|---|
+| **出力 CSV**(アプリ生成・スクリプト出力) | **UTF-8-sig (BOM 付き)** で統一(Excel 互換) |
+| **入力 CSV**(アップロード・読み込み) | UTF-8-sig / UTF-8 / Shift_JIS / cp932 を自動判定 |
+| 過去データ生CSV(`data/raw/`、TARGET エクスポート) | Shift_JIS のままで OK(読み込み時に自動変換) |
+
+実装担当箇所:
+- 出力: `scripts/generate_samples.py` の `write_csv()`、`scripts/extract_one_day.py`、
+  `app.py` の予想結果ダウンロードボタン → すべて `encoding="utf-8-sig"`
+- 入力: `data_loader.load_race_card()` が `utils.target_format.decode_with_fallback()` を
+  使って 4 種類のエンコーディングを順に試行
+
+新しい出力 CSV を追加するときは UTF-8-sig を明示すること:
+
+```python
+df.to_csv(path, encoding="utf-8-sig", index=False)
+# pandas は to_csv の encoding="utf-8-sig" で自動的に BOM を先頭に付与する
+```
+
 ### 開発ルール
 
 - 機能追加・修正は `feature/xxx` ブランチを切る(`main` 直編集禁止)
