@@ -88,6 +88,38 @@ KNOWN_COURSES: set[str] = {
     "東京", "中山", "京都", "阪神", "小倉", "福島", "新潟", "函館", "札幌", "中京",
 }
 
+# 発走時刻(レース番号 → "HH:MM")の推定テーブル。
+# TARGET frontier JV の「フルセット+単勝オッズ」エクスポートには発走時刻列が
+# 含まれていないため、JRAの典型的なタイムスケジュールから推定する。
+# 競馬場・日付によって ±10分程度ズレることがある(注記つきで表示する)。
+ESTIMATED_POST_TIMES_BY_RACE_NUMBER: dict[int, str] = {
+    1:  "10:00",
+    2:  "10:30",
+    3:  "11:00",
+    4:  "11:30",
+    # 4R - 5R 間に昼休憩(60 分前後)
+    5:  "12:30",
+    6:  "13:00",
+    7:  "13:30",
+    8:  "14:00",
+    9:  "14:30",
+    10: "15:00",
+    # 11R は重賞・G1 で 15:40 になることが多い
+    11: "15:35",
+    12: "16:05",
+}
+
+
+def estimate_post_time(race_number) -> str:
+    """レース番号から発走時刻(HH:MM)を推定する。範囲外/欠損なら空文字を返す。"""
+    try:
+        if pd.isna(race_number):
+            return ""
+        n = int(race_number)
+    except (ValueError, TypeError):
+        return ""
+    return ESTIMATED_POST_TIMES_BY_RACE_NUMBER.get(n, "")
+
 
 # =====================================================================
 # 単純ヘルパ
@@ -123,7 +155,7 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
     空のセルは NaN/<NA>/空文字 として伝搬する。
 
     返す列: race_id, race_date, racecourse, race_number, race_name,
-            distance, surface, going, finishing_position,
+            post_time, distance, surface, going, finishing_position,
             horse_number, horse_id, horse_name, jockey, trainer, weight,
             weight_change, time, last_3f, popularity, odds
     """
@@ -186,12 +218,16 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
     hn_valid = (hn_normalized >= 1) & (hn_normalized <= field_size)
     horse_number = hn_normalized.where(hn_valid).round().astype("Int64")
 
+    # 発走時刻はソース CSV に列が無いため、レース番号から推定して付与する
+    post_time = race_number.apply(estimate_post_time)
+
     return pd.DataFrame({
         "race_id":            race_id,
         "race_date":          race_date.dt.strftime("%Y-%m-%d"),
         "racecourse":         racecourse,
         "race_number":        race_number,
         "race_name":          col("race_name"),
+        "post_time":          post_time,
         "distance":           to_nullable_int(col("distance")),
         "surface":            col("surface"),
         "going":              col("going"),
