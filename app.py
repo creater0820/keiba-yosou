@@ -15,17 +15,19 @@ Streamlit エントリーポイント。
 
 from __future__ import annotations
 
+import hashlib
+
 import pandas as pd
 import streamlit as st
 
 from data_loader import (
     HistoricalData,
     load_historical_data,
-    load_race_card,
+    load_race_card_cached,
     summarize_race_card,
     validate_race_card,
 )
-from prediction_logic import HorsePrediction, predict_all_races
+from prediction_logic import HorsePrediction, predict_all_races_cached
 
 # =====================================================================
 # 画面全体の設定
@@ -75,15 +77,24 @@ uploaded = st.file_uploader(
     help="JV-Link または TARGET frontier JV からエクスポートした CSV を想定。",
 )
 
-# 出馬表 CSV を DataFrame に変換
+# 出馬表 CSV を DataFrame に変換(@st.cache_data でキャッシュ済み)
 race_card_df: pd.DataFrame | None = None
 source_name: str | None = None
+file_hash: str | None = None
 if uploaded is not None:
+    file_bytes = uploaded.getvalue()
+    file_hash = hashlib.md5(file_bytes).hexdigest()
     try:
-        race_card_df = load_race_card(uploaded)
+        # 同じバイト列なら再パースをスキップ。フィルタ切り替え時の再計算回避の要。
+        race_card_df = load_race_card_cached(file_bytes, uploaded.name)
         source_name = uploaded.name
     except Exception as e:
         st.error(f"CSV の読み込みに失敗しました: {e}")
+
+# 別ファイルがアップロードされたら、前回の予想結果は破棄する
+if file_hash is not None and st.session_state.get("predictions_for_file") != file_hash:
+    st.session_state.pop("all_predictions", None)
+    st.session_state.pop("predictions_for_file", None)
 
 
 # =====================================================================
@@ -180,109 +191,130 @@ if race_card_df is not None:
 
 
 # =====================================================================
-# 予想実行
+# 予想実行(全レース一括計算 → session_state 保存)
 # =====================================================================
+# ボタン押下時は **フィルタ前の race_card_df 全体** で予想計算する。
+# フィルタはあくまで「表示」フィルタなので、計算済み結果から派生させる。
+# これにより、ラジオ切替で再計算が走らず体感的に瞬時に絞り込める。
 if race_card_df is not None and historical is not None:
     st.divider()
     if st.button("🎯 予想実行", type="primary", use_container_width=True):
-        with st.spinner("予想計算中…"):
-            # フィルタ後の出馬表で予想計算(全場選択時は全レースが対象)
-            results = predict_all_races(display_df, historical)
+        # キャッシュキーは file_hash。同じファイルなら計算済み結果が即返る。
+        all_predictions = predict_all_races_cached(file_hash, race_card_df, historical)
+        st.session_state["all_predictions"] = all_predictions
+        st.session_state["predictions_for_file"] = file_hash
 
-        st.success(f"予想完了({len(results)} レース)")
+# =====================================================================
+# 予想結果の描画(session_state にあれば、ボタン未クリックでも表示維持)
+# =====================================================================
+predictions_in_session = st.session_state.get("all_predictions")
+if (predictions_in_session is not None
+        and st.session_state.get("predictions_for_file") == file_hash):
 
-        # 馬番(horse_number)は出馬表側にあるので、horse_id → 馬番 の引きを作る
-        # 出馬表に horse_number 列が無ければ空 dict にして、後段で "—" 表示にフォールバック
-        if "horse_number" in display_df.columns:
-            hn_map = dict(zip(
-                display_df["horse_id"].astype(str),
-                display_df["horse_number"],
-            ))
-        else:
-            hn_map = {}
+    # ----- 表示対象レースを「現在のフィルタ」で絞り込む -----
+    # display_df は全場/特定場で切り替わる。session の予想結果から該当 race_id を抽出。
+    display_race_ids = set(display_df["race_id"].unique())
+    display_predictions: dict[str, list[HorsePrediction]] = {
+        rid: preds for rid, preds in predictions_in_session.items()
+        if rid in display_race_ids
+    }
 
-        def _fmt_hn(horse_id: str) -> str:
-            """馬番をテーブル表示用に整形(欠損は '—')"""
-            v = hn_map.get(str(horse_id))
-            if v is None or pd.isna(v) or v == "":
-                return "—"
-            try:
-                return str(int(v))
-            except (ValueError, TypeError):
-                return str(v)
+    st.success(
+        f"予想完了({len(display_predictions)} / {len(predictions_in_session)} レース表示中"
+        + (f" / {selected_course}のみ" if selected_course != "全場" else "")
+        + ")"
+    )
 
-        # ダウンロード用フラットDataFrameを構築(フィルタ後のレースのみ)
-        download_rows: list[dict] = []
-        for race_id, preds in results.items():
-            race_info_row = display_df[display_df["race_id"] == race_id].iloc[0]
-            for pred in preds:
-                download_rows.append({
-                    "race_id": race_id,
-                    "racecourse": race_info_row.get("racecourse", ""),
-                    "race_number": race_info_row.get("race_number", ""),
-                    "race_name": race_info_row.get("race_name", ""),
-                    "distance": race_info_row.get("distance", ""),
-                    "surface": race_info_row.get("surface", ""),
-                    "印": pred.mark,
-                    "馬番": _fmt_hn(pred.horse_id),
-                    "horse_id": pred.horse_id,
-                    "horse_name": pred.horse_name,
-                    "jockey": pred.jockey,
-                    "score": pred.score,
-                    "reasons": " | ".join(pred.reasons),
-                })
-        download_df = pd.DataFrame(download_rows)
+    # ----- 馬番マップ(全 race_card_df から作って display 全体で使い回し) -----
+    if "horse_number" in race_card_df.columns:
+        hn_map = dict(zip(
+            race_card_df["horse_id"].astype(str),
+            race_card_df["horse_number"],
+        ))
+    else:
+        hn_map = {}
 
-        # ===== CSVダウンロードボタン(UTF-8-sig で BOM 付与、Excel互換) =====
-        # ファイル名にもフィルタ状態を反映(全場以外はサフィックス)
-        csv_bytes = download_df.to_csv(index=False).encode("utf-8-sig")
-        file_suffix = f"_{selected_course}" if selected_course != "全場" else ""
-        st.download_button(
-            label="📥 予想結果を CSV でダウンロード",
-            data=csv_bytes,
-            file_name=f"prediction_results{file_suffix}.csv",
-            mime="text/csv",
+    def _fmt_hn(horse_id: str) -> str:
+        """馬番をテーブル表示用に整形(欠損は '—')"""
+        v = hn_map.get(str(horse_id))
+        if v is None or pd.isna(v) or v == "":
+            return "—"
+        try:
+            return str(int(v))
+        except (ValueError, TypeError):
+            return str(v)
+
+    # ----- ダウンロード用フラットDataFrameを構築(現フィルタのレースのみ) -----
+    download_rows: list[dict] = []
+    for race_id, preds in display_predictions.items():
+        race_info_row = display_df[display_df["race_id"] == race_id].iloc[0]
+        for pred in preds:
+            download_rows.append({
+                "race_id": race_id,
+                "racecourse": race_info_row.get("racecourse", ""),
+                "race_number": race_info_row.get("race_number", ""),
+                "race_name": race_info_row.get("race_name", ""),
+                "distance": race_info_row.get("distance", ""),
+                "surface": race_info_row.get("surface", ""),
+                "印": pred.mark,
+                "馬番": _fmt_hn(pred.horse_id),
+                "horse_id": pred.horse_id,
+                "horse_name": pred.horse_name,
+                "jockey": pred.jockey,
+                "score": pred.score,
+                "reasons": " | ".join(pred.reasons),
+            })
+    download_df = pd.DataFrame(download_rows)
+
+    # ----- CSVダウンロードボタン(UTF-8-sig、Excel互換) -----
+    csv_bytes = download_df.to_csv(index=False).encode("utf-8-sig")
+    file_suffix = f"_{selected_course}" if selected_course != "全場" else ""
+    st.download_button(
+        label="📥 予想結果を CSV でダウンロード",
+        data=csv_bytes,
+        file_name=f"prediction_results{file_suffix}.csv",
+        mime="text/csv",
+    )
+
+    # ----- レースごとの結果表示(現フィルタのレースのみ) -----
+    st.subheader("レースごとの予想")
+    for race_id, preds in display_predictions.items():
+        race_info_row = display_df[display_df["race_id"] == race_id].iloc[0]
+        # エクスパンダのタイトルにレース概要を入れる
+        title = (
+            f"【{race_info_row.get('racecourse', '')} "
+            f"{race_info_row.get('race_number', '')}R】 "
+            f"{race_info_row.get('race_name', '')} "
+            f"{race_info_row.get('distance', '')}m "
+            f"{race_info_row.get('surface', '')}"
         )
+        with st.expander(title, expanded=True):
+            # 推奨馬テーブル(印付き = 上位4頭)を上部に表示
+            top_rows = [
+                {
+                    "印": p.mark,
+                    "馬番": _fmt_hn(p.horse_id),
+                    "馬名": p.horse_name,
+                    "騎手": p.jockey,
+                    "スコア": p.score,
+                }
+                for p in preds if p.mark
+            ]
+            if top_rows:
+                st.markdown("**推奨馬(上位4頭)**")
+                st.dataframe(pd.DataFrame(top_rows), hide_index=True, use_container_width=True)
 
-        # ===== レースごとの結果表示(フィルタ後のレースのみ) =====
-        st.subheader("レースごとの予想")
-        for race_id, preds in results.items():
-            race_info_row = display_df[display_df["race_id"] == race_id].iloc[0]
-            # エクスパンダのタイトルにレース概要を入れる
-            title = (
-                f"【{race_info_row.get('racecourse', '')} "
-                f"{race_info_row.get('race_number', '')}R】 "
-                f"{race_info_row.get('race_name', '')} "
-                f"{race_info_row.get('distance', '')}m "
-                f"{race_info_row.get('surface', '')}"
-            )
-            with st.expander(title, expanded=True):
-                # 推奨馬テーブル(印付き = 上位4頭)を上部に表示
-                top_rows = [
-                    {
-                        "印": p.mark,
-                        "馬番": _fmt_hn(p.horse_id),
-                        "馬名": p.horse_name,
-                        "騎手": p.jockey,
-                        "スコア": p.score,
-                    }
-                    for p in preds if p.mark
-                ]
-                if top_rows:
-                    st.markdown("**推奨馬(上位4頭)**")
-                    st.dataframe(pd.DataFrame(top_rows), hide_index=True, use_container_width=True)
-
-                # 各馬の理由(クリックで展開可能)
-                st.markdown("**全頭の評価詳細**")
-                for p in preds:
-                    mark_part = f"{p.mark} " if p.mark else "　 "
-                    label = f"{mark_part}{_fmt_hn(p.horse_id)} {p.horse_name}({p.jockey})  スコア {p.score}"
-                    with st.expander(label, expanded=False):
-                        if p.reasons:
-                            for r in p.reasons:
-                                st.write(f"- {r}")
-                        else:
-                            st.write("(理由情報なし)")
+            # 各馬の理由(クリックで展開可能)
+            st.markdown("**全頭の評価詳細**")
+            for p in preds:
+                mark_part = f"{p.mark} " if p.mark else "　 "
+                label = f"{mark_part}{_fmt_hn(p.horse_id)} {p.horse_name}({p.jockey})  スコア {p.score}"
+                with st.expander(label, expanded=False):
+                    if p.reasons:
+                        for r in p.reasons:
+                            st.write(f"- {r}")
+                    else:
+                        st.write("(理由情報なし)")
 
 elif race_card_df is None:
     st.info("👆 出馬表 CSV をアップロードしてください。")

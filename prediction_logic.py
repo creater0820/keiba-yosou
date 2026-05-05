@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import pandas as pd
+import streamlit as st
 
 from data_loader import HistoricalData
 
@@ -202,3 +203,27 @@ def predict_all_races(
     for race_id, group in race_card_df.groupby("race_id", sort=False):
         results[str(race_id)] = predict_race(group, historical, rules=rules)
     return results
+
+
+@st.cache_data(show_spinner="予想計算中…")
+def predict_all_races_cached(
+    race_card_hash: str,
+    _race_card_df: pd.DataFrame,
+    _historical: HistoricalData,
+) -> dict[str, list[HorsePrediction]]:
+    """
+    predict_all_races のキャッシュ版。
+
+    キャッシュキー:
+        race_card_hash (例: アップロードバイト列の MD5) のみ。
+        _race_card_df / _historical は接頭辞 _ で Streamlit のハッシュ対象から除外。
+        - DataFrame は内容ハッシュが重い(行数が多いと数秒)
+        - HistoricalData は dataclass で既定では hashable でない
+        race_card_hash が同一なら DataFrame の内容も同一という前提なので、
+        ハッシュキーから DataFrame を外しても安全。
+
+    使い方(app.py 側):
+        file_hash = hashlib.md5(uploaded_bytes).hexdigest()
+        predictions = predict_all_races_cached(file_hash, race_card_df, historical)
+    """
+    return predict_all_races(_race_card_df, _historical)

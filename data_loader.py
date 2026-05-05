@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import IO
 
 import pandas as pd
+import streamlit as st
 
 from utils.target_format import (
     decode_with_fallback,
@@ -162,6 +163,22 @@ def load_race_card(uploaded_file: IO | str | Path) -> pd.DataFrame:
 
     # 3) ヘッダー付き普通CSV(既存サンプルや日本語列名 CSV はこのパス)
     return pd.read_csv(io.StringIO(text))
+
+
+@st.cache_data(show_spinner="出馬表を読み込み中…")
+def load_race_card_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
+    """
+    load_race_card のキャッシュ版。同じバイト列の再読み込みを回避する。
+
+    キャッシュキーは (file_bytes, file_name) のタプル。Streamlit はバイト列の
+    内容ハッシュを取るので、ファイル内容が同じなら名前が違っても同じキャッシュ
+    エントリにヒットする(file_name は表示用に残しているだけ)。
+
+    Streamlit の st.file_uploader が返す UploadedFile は内部バッファを巻き戻し
+    再利用するたびに seek が必要なため、Streamlit 側ですでに getvalue() してから
+    呼び出すことを期待している。
+    """
+    return load_race_card(io.BytesIO(file_bytes))
 
 
 @dataclass
