@@ -1,229 +1,235 @@
 """
-予想ロジックモジュール。
+予想ロジック本体(本ロジック v1.0)。
+
+CLAUDE.md「推奨馬選定ロジック(本ロジック v1.0)」を統合的に走らせる。
+
+Phase 2: utils/onmark_rules.py(○マーク収集)
+Phase 3: utils/judgment_engine.py(本命判定 / 減点 / ワイド候補)
+Phase 4: utils/betting_strategy.py(ダート不良補正 / 偶奇絞り / 買い目生成)
+
+外部 API:
+- predict_race_v1(race_card_df, historical, target_date) → RacePrediction
+- predict_all_races_v1(race_card_df, historical) → dict[race_id → RacePrediction]
+- HorsePrediction(後方互換: app.py の旧シグネチャを保持するため最小実装)
+- predict_all_races_cached: app.py の Streamlit @st.cache_data エントリポイント
 
 設計方針:
-- このモジュールは「データの読み込み(data_loader.py)」と「画面描画(app.py)」のどちらにも依存しない。
-- スコアリングは複数の小さな関数(rule)に分離し、将来お父様の本ロジックに差し替え可能にする。
-- 各 rule は (race_card_row, historical_data) を受け取り (score, reason_text) を返す純粋関数。
-- predict_race() は出馬表1レース分を受け取り、各馬のスコアと印(◎○▲△)を返す。
-
-MVP段階の暫定ロジック(CLAUDE.md):
-- 直近3走の平均着順 × -10点
-- 直近3走の上がり3F平均が33.5秒未満なら +20点
-- 騎手の年間勝率 × 100点
-- 距離適性(同距離での連対率) × 50点
+- 既存の MVP スコアリングは廃止(本ロジック v1.0 へ完全置換)。
+- 全関数 race_card_df / HistoricalData の DataFrame アクセスのみで完結。
+- 計算結果は dataclass 化 → app.py のレンダラがそのまま読める。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable
 
 import pandas as pd
 import streamlit as st
 
 from data_loader import HistoricalData
+from utils.betting_strategy import (
+    BettingPlan,
+    apply_dirt_heavy_correction,
+    filter_by_frame_parity,
+    generate_betting_recommendations,
+)
+from utils.frame_number import horse_number_to_frame
+from utils.judgment_engine import (
+    DemeritEntry,
+    HorseMarkData,
+    JudgmentResult,
+    WideCandidate,
+    compute_popularities_from_odds,
+    determine_main_pick,
+    extract_wide_candidates,
+    get_last_finishing_positions,
+)
+from utils.onmark_rules import collect_onmarks
+from utils.race_history import determine_running_style, get_recent_runs_for_race
 
 
-# ===== 戻り値の型 =====
-
+# ==================================================================
+# 旧 API の最小互換レイヤ
+# ==================================================================
+# app.py は HorsePrediction / predict_all_races_cached を import している。
+# v1.0 では使わない設計だが、import エラーを回避するため最小定義を残す。
 @dataclass
 class HorsePrediction:
-    """1頭分の予想結果。画面に直接表示できるよう日本語フィールドを持つ。"""
-    horse_id: str
-    horse_name: str
-    jockey: str
-    score: float                 # 合計スコア(高いほど推奨)
-    mark: str                    # ◎ ○ ▲ △ または "" (印なし)
-    reasons: list[str] = field(default_factory=list)  # 理由(画面で展開表示)
+    """後方互換のための薄い shim(v1.0 では未使用)。"""
+    horse_id: str = ""
+    horse_name: str = ""
+    jockey: str = ""
+    score: float = 0.0
+    mark: str = ""
+    reasons: list[str] = field(default_factory=list)
 
 
-# 印は上位4頭にこの順番で付与
-RANK_MARKS = ["◎", "○", "▲", "△"]
+# ==================================================================
+# v1.0 戻り値型
+# ==================================================================
+@dataclass
+class RacePrediction:
+    """v1.0 1レース分の予想結果。app.py のレンダラへの入力。"""
+    race_id: str
+    race_meta: dict                    # {racecourse, race_number, race_name, distance, surface, going, post_time}
+    horses: list[HorseMarkData]        # 全馬の○マーク + メタ(人気・脚質・枠番)
+    judgment: JudgmentResult            # 本命判定結果
+    wide_candidates: list[WideCandidate]
+    betting: BettingPlan
+    demerit_entries: list[DemeritEntry]
 
 
-# ===== スコアリングルール群(差し替え可能な部品) =====
-#
-# 各ルールは下記のシグネチャ:
-#     def rule(horse_row: pd.Series, hist: HistoricalData) -> tuple[float, str | None]
-#
-# - 第1引数: 出馬表の1行(その馬のレースエントリー)
-# - 第2引数: 過去データ一式
-# - 戻り値: (このルールのスコア, 理由文字列または None)
-#   理由が None の場合は表示しない(該当条件が成立しなかったケース)
+# ==================================================================
+# データ準備ヘルパ
+# ==================================================================
 
-
-def _past_3_runs(horse_id: str, hist: HistoricalData) -> pd.DataFrame:
-    """指定した馬の直近3走分のレース履歴を返す。日付降順。"""
-    past = hist.races[hist.races["horse_id"] == horse_id].copy()
-    if past.empty:
-        return past
-    # race_date は文字列のことも日付のこともあるため、両対応
-    past["race_date"] = pd.to_datetime(past["race_date"], errors="coerce")
-    return past.sort_values("race_date", ascending=False).head(3)
-
-
-def rule_recent_finish(horse_row: pd.Series, hist: HistoricalData) -> tuple[float, str | None]:
-    """直近3走の平均着順 × -10点 (着順が良いほど高スコア)"""
-    past3 = _past_3_runs(horse_row["horse_id"], hist)
-    if past3.empty:
-        return 0.0, None
-    avg = past3["finishing_position"].mean()
-    score = -10.0 * avg
-    return score, f"直近3走の平均着順 {avg:.1f} → {score:+.1f}点"
-
-
-def rule_recent_last3f(horse_row: pd.Series, hist: HistoricalData) -> tuple[float, str | None]:
-    """直近3走の上がり3F平均が 33.5秒未満なら +20点(末脚評価)"""
-    past3 = _past_3_runs(horse_row["horse_id"], hist)
-    if past3.empty or "last_3f" not in past3.columns:
-        return 0.0, None
-    avg_3f = past3["last_3f"].mean()
-    if pd.isna(avg_3f):
-        return 0.0, None
-    if avg_3f < 33.5:
-        return 20.0, f"上がり3F平均 {avg_3f:.1f}秒(33.5秒未満)→ +20点"
-    return 0.0, f"上がり3F平均 {avg_3f:.1f}秒(33.5秒未満ではない)"
-
-
-def rule_jockey_win_rate(horse_row: pd.Series, hist: HistoricalData) -> tuple[float, str | None]:
-    """騎手の(過去データ全体での)勝率 × 100点"""
-    jockey = horse_row.get("jockey")
-    if not jockey:
-        return 0.0, None
-    jockey_rides = hist.races[hist.races["jockey"] == jockey]
-    if jockey_rides.empty:
-        return 0.0, f"騎手 {jockey}: 過去データなし"
-    wins = (jockey_rides["finishing_position"] == 1).sum()
-    win_rate = wins / len(jockey_rides)
-    score = 100.0 * win_rate
-    return score, f"騎手 {jockey} の勝率 {win_rate:.1%}({wins}/{len(jockey_rides)})→ {score:+.1f}点"
-
-
-def rule_distance_aptitude(horse_row: pd.Series, hist: HistoricalData) -> tuple[float, str | None]:
-    """距離適性: 同じ距離での連対率(1-2着率) × 50点"""
-    horse_id = horse_row["horse_id"]
-    distance = horse_row.get("distance")
-    if distance is None:
-        return 0.0, None
-    same_dist = hist.races[
-        (hist.races["horse_id"] == horse_id) & (hist.races["distance"] == distance)
-    ]
-    if same_dist.empty:
-        return 0.0, f"距離{distance}m での実績なし"
-    rentai = (same_dist["finishing_position"] <= 2).sum()
-    rate = rentai / len(same_dist)
-    score = 50.0 * rate
-    return score, f"距離{distance}m 連対率 {rate:.1%}({rentai}/{len(same_dist)})→ {score:+.1f}点"
-
-
-# 適用するルールのリスト。お父様の本ロジック実装時はここを差し替えるだけで良い。
-# (1) ルールごとに関数を入れ替え、(2) 順序や有効化フラグもここで制御。
-ScoringRule = Callable[[pd.Series, HistoricalData], tuple[float, "str | None"]]
-
-DEFAULT_RULES: list[ScoringRule] = [
-    rule_recent_finish,
-    rule_recent_last3f,
-    rule_jockey_win_rate,
-    rule_distance_aptitude,
-]
-
-
-# ===== レース1本分の予想 =====
-
-def predict_race(
-    race_df: pd.DataFrame,
-    historical: HistoricalData,
-    rules: list[ScoringRule] | None = None,
-    top_n: int = 4,
-) -> list[HorsePrediction]:
-    """
-    1レース分の出馬表に対して予想を行う。
-
-    引数:
-        race_df: 1レース分の出馬表 DataFrame(行=出走馬1頭)
-        historical: 過去データ
-        rules: 適用するスコアリングルール(未指定なら DEFAULT_RULES)
-        top_n: 印を付ける頭数(デフォルト 4 → ◎○▲△)
-
-    戻り値:
-        スコア降順に並んだ HorsePrediction のリスト(全頭分。上位 top_n 頭に印付き)
-    """
-    if rules is None:
-        rules = DEFAULT_RULES
-
-    predictions: list[HorsePrediction] = []
-    for _, row in race_df.iterrows():
-        # 1頭ずつ各ルールを適用してスコアを合計。例外が出た馬はスキップせずスコア0扱いで継続。
-        total_score = 0.0
-        reasons: list[str] = []
-        for rule in rules:
-            try:
-                score, reason = rule(row, historical)
-            except Exception as e:
-                # 個別ルール内例外は致命的ではない: その馬・そのルールだけ無視して継続
-                score, reason = 0.0, f"[{rule.__name__}] 計算スキップ: {e}"
-            total_score += score
-            if reason:
-                reasons.append(reason)
-
-        # 過去データに完全にいない馬は明示的に注釈
-        if historical.races[historical.races["horse_id"] == row["horse_id"]].empty:
-            reasons.insert(0, "※過去データなし(参考スコアのみ)")
-
-        predictions.append(HorsePrediction(
-            horse_id=str(row["horse_id"]),
-            horse_name=str(row["horse_name"]),
-            jockey=str(row.get("jockey", "")),
-            score=round(total_score, 2),
-            mark="",  # 後でランク付け
-            reasons=reasons,
-        ))
-
-    # スコア降順に並べ替えて上位 top_n に印を付ける
-    predictions.sort(key=lambda p: p.score, reverse=True)
-    for i, pred in enumerate(predictions[:top_n]):
-        if i < len(RANK_MARKS):
-            pred.mark = RANK_MARKS[i]
-
-    return predictions
-
-
-def predict_all_races(
+def _build_horse_mark_data(
     race_card_df: pd.DataFrame,
-    historical: HistoricalData,
-    rules: list[ScoringRule] | None = None,
-) -> dict[str, list[HorsePrediction]]:
-    """
-    出馬表全体を race_id 単位でグループ化し、各レースの予想結果をまとめて返す。
+    historical_df: pd.DataFrame,
+    target_date: str,
+) -> list[HorseMarkData]:
+    """1レース分の race_card + historical から HorseMarkData リストを組み立てる。"""
+    field_size = len(race_card_df)
+    horse_ids = race_card_df["horse_id"].astype(str).tolist()
 
-    戻り値: { race_id: [HorsePrediction, ...] }
-    """
-    results: dict[str, list[HorsePrediction]] = {}
+    # 直近5走を一括キャッシュ取得
+    history = get_recent_runs_for_race(
+        tuple(horse_ids), target_date, historical_df, n=5,
+    )
+    # 前走着順 (rule_4 用)
+    last_pos = get_last_finishing_positions(horse_ids, target_date, historical_df)
+    # 人気
+    pops = compute_popularities_from_odds(race_card_df["odds"])
+
+    horses: list[HorseMarkData] = []
+    for idx, row in race_card_df.reset_index(drop=True).iterrows():
+        hid = str(row["horse_id"])
+        try:
+            hn = int(row["horse_number"]) if pd.notna(row["horse_number"]) else 0
+        except (ValueError, TypeError):
+            hn = 0
+        try:
+            frame = horse_number_to_frame(hn, field_size) if hn else 0
+        except ValueError:
+            frame = 0
+
+        recent = history.get(hid, [])
+        style = determine_running_style(recent)
+        marks_count, matched = collect_onmarks(recent)
+
+        try:
+            popularity = int(pops.iloc[idx]) if not pd.isna(pops.iloc[idx]) else 0
+        except (IndexError, ValueError, TypeError):
+            popularity = 0
+
+        horses.append(HorseMarkData(
+            horse_id=hid,
+            horse_name=str(row["horse_name"]).strip(),
+            horse_number=hn,
+            frame_number=frame,
+            popularity=popularity,
+            running_style=style,
+            marks_count=marks_count,
+            matched_rules=matched,
+            last_finishing_position=last_pos.get(hid),
+        ))
+    return horses
+
+
+def _build_race_meta(race_card_df: pd.DataFrame) -> dict:
+    """race_card_df の先頭1行からレースメタ情報を抜く。"""
+    if race_card_df.empty:
+        return {}
+    head = race_card_df.iloc[0]
+    return {
+        "race_id": str(head.get("race_id", "")),
+        "race_date": str(head.get("race_date", "")),
+        "racecourse": str(head.get("racecourse", "")).strip(),
+        "race_number": int(head["race_number"]) if pd.notna(head.get("race_number")) else 0,
+        "race_name": str(head.get("race_name", "")).strip(),
+        "distance": int(head["distance"]) if pd.notna(head.get("distance")) else 0,
+        "surface": str(head.get("surface", "")).strip(),
+        "going": str(head.get("going", "")).strip(),
+        "post_time": str(head.get("post_time", "")).strip(),
+    }
+
+
+# ==================================================================
+# v1.0 メインエントリ
+# ==================================================================
+
+def predict_race_v1(
+    race_card_df: pd.DataFrame,
+    historical: HistoricalData | pd.DataFrame,
+    target_date: str | None = None,
+) -> RacePrediction:
+    """1レース分の v1.0 予想を実行する。"""
+    if isinstance(historical, HistoricalData):
+        hist_df = historical.races
+    else:
+        hist_df = historical
+
+    meta = _build_race_meta(race_card_df)
+    if target_date is None:
+        target_date = meta.get("race_date", "")
+
+    # Phase 2: ○マーク収集
+    horses = _build_horse_mark_data(race_card_df, hist_df, target_date)
+
+    # Phase 4 補正(R23): ダート不良で逃げに ○+1
+    horses = apply_dirt_heavy_correction(horses, meta)
+
+    # Phase 3: 本命判定 + 減点
+    judgment = determine_main_pick(horses, meta)
+
+    # Phase 3: ワイド候補抽出
+    wides = extract_wide_candidates(horses, meta)
+
+    # Phase 4 (R2): 偶奇フィルタ
+    wides = filter_by_frame_parity(wides, horses)
+
+    # Phase 4: 買い目生成
+    betting = generate_betting_recommendations(
+        judgment.main_pick, judgment.sub_pick, wides, horses
+    )
+
+    return RacePrediction(
+        race_id=meta.get("race_id", ""),
+        race_meta=meta,
+        horses=horses,
+        judgment=judgment,
+        wide_candidates=wides,
+        betting=betting,
+        demerit_entries=judgment.demerit_entries,
+    )
+
+
+def predict_all_races_v1(
+    race_card_df: pd.DataFrame,
+    historical: HistoricalData | pd.DataFrame,
+) -> dict[str, RacePrediction]:
+    """出馬表全体を race_id 単位で v1.0 予想する。"""
+    results: dict[str, RacePrediction] = {}
     for race_id, group in race_card_df.groupby("race_id", sort=False):
-        results[str(race_id)] = predict_race(group, historical, rules=rules)
+        target_date = str(group["race_date"].iloc[0])
+        results[str(race_id)] = predict_race_v1(group, historical, target_date)
     return results
 
+
+# ==================================================================
+# Streamlit @st.cache_data エントリポイント
+# ==================================================================
+# 旧名: predict_all_races_cached(race_card_hash, _race_card_df, _historical)
+# v1.0 でも同名で残す(app.py 側の呼び出し変更なし)。
 
 @st.cache_data(show_spinner="予想計算中…")
 def predict_all_races_cached(
     race_card_hash: str,
     _race_card_df: pd.DataFrame,
     _historical: HistoricalData,
-) -> dict[str, list[HorsePrediction]]:
+) -> dict[str, RacePrediction]:
     """
-    predict_all_races のキャッシュ版。
-
-    キャッシュキー:
-        race_card_hash (例: アップロードバイト列の MD5) のみ。
-        _race_card_df / _historical は接頭辞 _ で Streamlit のハッシュ対象から除外。
-        - DataFrame は内容ハッシュが重い(行数が多いと数秒)
-        - HistoricalData は dataclass で既定では hashable でない
-        race_card_hash が同一なら DataFrame の内容も同一という前提なので、
-        ハッシュキーから DataFrame を外しても安全。
-
-    使い方(app.py 側):
-        file_hash = hashlib.md5(uploaded_bytes).hexdigest()
-        predictions = predict_all_races_cached(file_hash, race_card_df, historical)
+    race_card_hash でキャッシュされる v1.0 予想エントリポイント。
+    _race_card_df と _historical は ハッシュ対象外(_ 接頭辞)。
     """
-    return predict_all_races(_race_card_df, _historical)
+    return predict_all_races_v1(_race_card_df, _historical)
