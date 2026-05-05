@@ -48,6 +48,13 @@ JV_LINK_EXPECTED_COLS = 52
 #   [22-23] 着差・着差秒
 #   [24]    用途不明の 1..N 順位(かつて馬番と誤認していたが JRA 公式と
 #            ほぼ合わない。何らかのレース結果由来ランキングと推定)
+#   [28]    1コーナー通過順位                          ← corner_1
+#   [29]    2コーナー通過順位                          ← corner_2
+#   [30]    3コーナー通過順位                          ← corner_3
+#   [31]    4コーナー通過順位                          ← corner_4
+#            (2025 ダービー クロワデュノール の 4-3-2-3 パターン
+#             含め、複数レースの典型パターン(逃げ:1-1-1-1、追込:18-18-18-18
+#             等)で実 JRA 結果と整合することを確認済み)
 #   [25]    走破タイム(秒、例: 70.3 = 1分10秒3)
 #   [26]    走破タイム(別表現、1103 = 1分10秒3)
 #   [27-31] 時計指数・通過順
@@ -86,6 +93,11 @@ RACES_COL: dict[str, int] = {
     # horse_id は [37] 血統登録番号(8桁、stable)。同じ馬が複数レースで同じ値を持つ。
     # かつて [40] を使っていたが per-race で変わる通し番号と判明 → 過去履歴の引き当てに使えなかった。
     "horse_id":           37,
+    # コーナー通過順位(1〜4 コーナー、本ロジック v1.0 の脚質判定で使う)
+    "corner_1":           28,
+    "corner_2":           29,
+    "corner_3":           30,
+    "corner_4":           31,
     "sire":               43,
     "dam":                44,
     "dam_sire":           45,
@@ -151,6 +163,16 @@ def to_nullable_int(s: pd.Series) -> pd.Series:
     return f.round().astype("Int64")
 
 
+def to_corner_position(s: pd.Series) -> pd.Series:
+    """
+    通過順位列専用: 1..N の自然数のみ valid とし、0 / 負 / 欠損はすべて <NA>。
+    JRA データでは「通過順位が記録されないレース(障害競走の一部など)」で
+    0 が入ることがあるため、それを NaN に正規化する。
+    """
+    n = pd.to_numeric(s, errors="coerce").round()
+    return n.where(n >= 1).astype("Int64")
+
+
 # =====================================================================
 # パーサ本体
 # =====================================================================
@@ -166,7 +188,8 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
     返す列: race_id, race_date, racecourse, race_number, race_name,
             post_time, distance, surface, going, finishing_position,
             horse_number, horse_id, horse_name, jockey, trainer, weight,
-            weight_change, time, last_3f, popularity, odds
+            weight_change, time, last_3f, popularity, odds,
+            corner_1, corner_2, corner_3, corner_4
     """
     if raw.shape[1] != JV_LINK_EXPECTED_COLS:
         raise ValueError(
@@ -254,6 +277,11 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
         # popularity も同上 → NaN
         "popularity":         pd.Series([pd.NA] * len(raw), dtype="Int64"),
         "odds":               pd.to_numeric(col("odds"), errors="coerce"),
+        # コーナー通過順位(0 や欠損は <NA>。JRA で 0 は記録なし扱い)
+        "corner_1":           to_corner_position(col("corner_1")),
+        "corner_2":           to_corner_position(col("corner_2")),
+        "corner_3":           to_corner_position(col("corner_3")),
+        "corner_4":           to_corner_position(col("corner_4")),
     })
 
 

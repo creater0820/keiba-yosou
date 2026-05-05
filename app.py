@@ -243,7 +243,7 @@ def render_predictions_section(
 # Streamlit Cloud の再デプロイでは pickle キャッシュが残り、旧スキーマの
 # 物体(.source(str)を持ち .sources(dict)を持たない)が返ってくる事故が
 # 起きるため、スキーマを変えたらここの値を v2 → v3 のように手で上げる。
-HISTORICAL_DATA_SCHEMA_VERSION = "v2-per-table-sources"
+HISTORICAL_DATA_SCHEMA_VERSION = "v3-corner-positions"
 
 
 @st.cache_data(show_spinner="過去データを読み込み中…")
