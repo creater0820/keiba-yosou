@@ -30,6 +30,7 @@ from data_loader import (
     validate_race_card,
 )
 from prediction_logic import HorsePrediction, predict_all_races_cached
+from utils.recent_runs_renderer import render_recent_runs_matrix
 
 # =====================================================================
 # 画面全体の設定
@@ -76,81 +77,13 @@ def _parse_course_from_label(label: str) -> str:
 # =====================================================================
 # 描画ヘルパ
 # =====================================================================
-# スコア横棒グラフの色分け(◎○▲△ + 印なし正/負)
-_MARK_COLORS = {
-    "◎": "#FFD700",   # 金
-    "○": "#C0C0C0",   # 銀
-    "▲": "#CD7F32",   # 銅
-    "△": "#A0D8EF",   # 薄水色
-}
-_NO_MARK_POSITIVE = "#4CAF50"   # 緑
-_NO_MARK_NEGATIVE = "#9E9E9E"   # 灰
-
-
-def _build_score_chart(preds, fmt_hn):
-    """
-    1レース分の全頭スコアを横棒グラフ化する Plotly Figure を返す。
-
-    引数:
-        preds: list[HorsePrediction] — 1レースの全推奨予測
-        fmt_hn: callable(horse_id: str) -> str
-                馬番を表示用文字列にする関数(欠損は "—")
-
-    色分け:
-        ◎=金、○=銀、▲=銅、△=薄水色、印なし正=緑、印なし負=灰
-    """
-    rows = []
-    for p in preds:
-        hn_str = fmt_hn(p.horse_id)
-        if p.mark in _MARK_COLORS:
-            color = _MARK_COLORS[p.mark]
-        elif p.score >= 0:
-            color = _NO_MARK_POSITIVE
-        else:
-            color = _NO_MARK_NEGATIVE
-        # 印が無い行も全角スペースで桁を揃え、Y軸ラベルを縦方向に綺麗に並べる
-        mark_part = p.mark if p.mark else "  "
-        label = f"{mark_part} {hn_str:>2} {p.horse_name}"
-        rows.append({"label": label, "score": float(p.score), "color": color})
-
-    # Plotly の orientation='h' は「データ最初の行」が「下」に来るので、
-    # スコア昇順にしておくと見た目では「上が高スコア」になる
-    chart_df = pd.DataFrame(rows).sort_values("score", ascending=True)
-
-    # 高さ: 出走頭数 × 25px(動的)、最低 200px は確保して描画破綻を防ぐ
-    height = max(200, len(preds) * 25 + 60)
-
-    fig = px.bar(
-        chart_df,
-        x="score",
-        y="label",
-        orientation="h",
-        height=height,
-    )
-    fig.update_traces(
-        marker_color=chart_df["color"].tolist(),
-        texttemplate="%{x:.1f}",
-        textposition="outside",
-        cliponaxis=False,    # ラベルが軸外でも描画(端で見切れない)
-    )
-    fig.update_layout(
-        margin=dict(t=20, b=20, l=10, r=40),
-        xaxis_title="スコア",
-        yaxis_title=None,
-        showlegend=False,
-        bargap=0.25,
-    )
-    # 0 のところに点線基準線
-    fig.add_vline(x=0, line_dash="dot", line_color="gray", line_width=1)
-    return fig
-
-
 def render_predictions_section(
     *,
     all_predictions: dict[str, list[HorsePrediction]],
     race_card_df: pd.DataFrame,
     display_df: pd.DataFrame,
     selected_course: str,
+    historical_races: pd.DataFrame,
 ) -> None:
     """
     予想結果セクションを描画する(成功メッセージ・CSVダウンロード・レース別エクスパンダ)。
@@ -160,6 +93,7 @@ def render_predictions_section(
         race_card_df:    アップロード時の出馬表全体(馬番 lookup 用、フィルタ前)
         display_df:      現フィルタ後の出馬表(表示対象 race_id を導出する)
         selected_course: サイドバー選択値("全場" or 場名)
+        historical_races: 過去レースの DataFrame(直近5走戦歴マトリクス用)
     """
     # 表示対象 race_id で予想を絞る(計算済み結果からの派生なので瞬時)
     display_race_ids = set(display_df["race_id"].unique())
@@ -282,10 +216,10 @@ def render_predictions_section(
                 st.markdown("**推奨馬(上位4頭)**")
                 st.dataframe(pd.DataFrame(top_rows), hide_index=True, use_container_width=True)
 
-            # 全頭スコアの横棒グラフ(◎○▲△ がどれくらい優位か視覚化)
-            st.markdown("**スコアランキング**")
-            score_fig = _build_score_chart(preds, _fmt_hn)
-            st.plotly_chart(score_fig, use_container_width=True)
+            # 直近5走戦歴マトリクス(出走馬全頭の調子・適性を一望)
+            with st.expander("📊 直近5走戦歴", expanded=False):
+                race_card_for_this = display_df[display_df["race_id"] == race_id]
+                render_recent_runs_matrix(race_card_for_this, preds, historical_races)
 
             st.markdown("**全頭の評価詳細**")
             for p in preds:
@@ -487,12 +421,14 @@ if race_card_df is not None and historical is not None:
 predictions_in_session = st.session_state.get("all_predictions")
 if (predictions_in_session is not None
         and st.session_state.get("predictions_for_file") == file_hash
-        and race_card_df is not None):
+        and race_card_df is not None
+        and historical is not None):
     render_predictions_section(
         all_predictions=predictions_in_session,
         race_card_df=race_card_df,
         display_df=display_df,
         selected_course=selected_course,
+        historical_races=historical.races,
     )
 
 elif race_card_df is None:
