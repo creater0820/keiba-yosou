@@ -26,86 +26,25 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# プロジェクトルートを import パスに追加(scripts/ から utils/ を読むため)
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import pandas as pd
+
+# JV-Link 52列マッピング・パーサ・知名集合は utils/target_format.py に集約。
+# data_loader.load_race_card もこのモジュールを再利用する。
+from utils.target_format import (
+    JV_LINK_EXPECTED_COLS,
+    KNOWN_COURSES,
+    parse_jra_van_dataframe,
+)
 
 # ===== パス設定 =====
 RAW_DIR = Path("data/raw")
 OUT_DIR = Path("data/historical")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-# =====================================================================
-# races: TARGET frontier JV (JRA-VAN) RA+SE+単勝オッズ 結合CSV
-#   - ヘッダー行なし
-#   - 文字コード Shift_JIS (cp932)
-#   - 52 列の位置依存フォーマット
-# =====================================================================
-
-RACES_JRA_VAN_EXPECTED_COLS = 52
-
-# 列インデックス → 内部フィールド名
-# (52列のうち本MVPで使う列のみ。それ以外は無視)
-#
-# 確定した位置(実データ確認済み):
-#   [0-2]   年・月・日
-#   [3]     開催回
-#   [4]     競馬場(漢字)
-#   [5]     開催日次
-#   [6]     レース番号    ← race_number
-#   [7]     レース名
-#   [8]     出走頭数(本MVPでは未使用)
-#   [9]     トラック種別(芝/ダ/障)
-#   [10]    内/外
-#   [11]    距離(m)
-#   [12]    馬場状態
-#   [13]    馬名
-#   [14]    性別
-#   [15]    年齢
-#   [16]    騎手
-#   [17]    斤量
-#   [18]    馬番(枠番)
-#   [19]    着順(2桁ゼロ埋め文字列、例 '01' = 1着)
-#   [20-24] 馬番・着差・補正など
-#   [25]    走破タイム(秒、例: 70.3 = 1分10秒3)  ← time_seconds
-#   [26]    走破タイム(別表現、1103 = 1分10秒3)
-#   [27-31] その他指数
-#   [32]    上がり3F(秒)                          ← last_3f
-#   [33]    馬体重(kg)                            ← weight
-#   [34]    調教師                                ← trainer
-#   [35]    厩舎所属(栗東/美浦)
-#   [36-39] 各種指数・順位
-#   [40]    馬登録番号(10桁)                      ← horse_id
-#   [41]    馬主、 [42] 生産牧場
-#   [43]    父、 [44] 母、 [45] 母父
-#   [46]    毛色、 [47] 生年月日、 [48-50] その他
-#   [51]    単勝オッズ
-RACES_COL: dict[str, int] = {
-    "year":                0,
-    "month":               1,
-    "day":                 2,
-    "racecourse":          4,
-    "race_number":         6,
-    "race_name":           7,
-    "surface":             9,
-    "distance":           11,
-    "going":              12,
-    "horse_name":         13,
-    "jockey":             16,
-    "finishing_position": 19,
-    "time_seconds":       25,
-    "last_3f":            32,
-    "weight":             33,
-    "trainer":            34,
-    "horse_id":           40,
-    "sire":               43,
-    "dam":                44,
-    "dam_sire":           45,
-    "odds":               51,
-}
-
-# 検証用の知名(JRA 中央10場)
-KNOWN_COURSES = {
-    "東京", "中山", "京都", "阪神", "小倉", "福島", "新潟", "函館", "札幌", "中京",
-}
 
 # =====================================================================
 # horses / pedigree: 既存の列名ヘッダー付きCSV(rename map で正規化)
@@ -146,25 +85,8 @@ def _list_csv(table_name: str) -> list[Path]:
     return sorted(RAW_DIR.glob(f"{table_name}*.csv"))
 
 
-def _secs_to_time_str(secs) -> str:
-    """秒数を 'M:SS.SS' 形式に変換(NaN は空文字)。"""
-    if pd.isna(secs):
-        return ""
-    minutes = int(secs // 60)
-    sec = secs - minutes * 60
-    if minutes > 0:
-        return f"{minutes}:{sec:05.2f}"
-    return f"{sec:.2f}"
-
-
-def _to_nullable_int(s: pd.Series) -> pd.Series:
-    """文字列Series → Int64(欠損は <NA>、小数値は四捨五入)。"""
-    f = pd.to_numeric(s, errors="coerce")
-    return f.round().astype("Int64")
-
-
 # =====================================================================
-# races コンバータ (JV-Link 位置依存)
+# races コンバータ (JV-Link 位置依存パース部は utils/target_format に委譲)
 # =====================================================================
 
 def _read_jra_van_csv(path: Path) -> pd.DataFrame:
@@ -181,77 +103,22 @@ def _parse_races_jra_van(paths: list[Path]) -> pd.DataFrame:
     """
     JV-Link RA+SE+単勝オッズ CSV(複数可)を読み込み、
     CLAUDE.md スキーマの DataFrame に変換して返す。
+
+    位置依存マッピング自体は utils/target_format.parse_jra_van_dataframe に
+    集約されており、ここではファイル読み込み・列数チェック・結合のみ担当する。
     """
     frames: list[pd.DataFrame] = []
     for p in paths:
         df = _read_jra_van_csv(p)
-        if df.shape[1] != RACES_JRA_VAN_EXPECTED_COLS:
-            print(f"  ⚠ {p.name}: {RACES_JRA_VAN_EXPECTED_COLS}列を想定したが {df.shape[1]} 列でした → スキップ")
+        if df.shape[1] != JV_LINK_EXPECTED_COLS:
+            print(f"  ⚠ {p.name}: {JV_LINK_EXPECTED_COLS}列を想定したが {df.shape[1]} 列でした → スキップ")
             continue
         print(f"  ✓ {p.name}: {len(df):,} 行")
         frames.append(df)
     if not frames:
         return pd.DataFrame()
     raw = pd.concat(frames, ignore_index=True)
-
-    # 列名インデックスから値を取り出すヘルパ(strip 込み)
-    def col(name: str) -> pd.Series:
-        return raw[RACES_COL[name]].fillna("").astype(str).str.strip()
-
-    # ----- 日付組み立て(年は 20xx 想定) -----
-    yy = col("year").str.zfill(2)
-    mm = col("month").str.zfill(2)
-    dd = col("day").str.zfill(2)
-    race_date = pd.to_datetime("20" + yy + "-" + mm + "-" + dd, format="%Y-%m-%d", errors="coerce")
-
-    # ----- 基本列 -----
-    racecourse = col("racecourse")
-    race_number = _to_nullable_int(col("race_number"))
-
-    # race_id: "R" + yyyymmdd + "-" + 場頭文字 + zfill2(R)
-    # 例: R20230722-札01
-    race_id = (
-        "R"
-        + race_date.dt.strftime("%Y%m%d").fillna("00000000")
-        + "-"
-        + racecourse.str[:1]
-        + race_number.astype("string").str.zfill(2)
-    )
-
-    # 走破タイム: 秒数(70.3)→ "1:10.30"
-    time_secs = pd.to_numeric(col("time_seconds"), errors="coerce")
-    time_str = time_secs.apply(_secs_to_time_str)
-
-    # 馬登録番号: 10桁にゼロ埋め(JRA-VAN は10桁が標準)
-    horse_id = col("horse_id").str.zfill(10)
-
-    # 馬体重: 単位に "kg" などが混入することがあるので数値だけ抜く
-    weight = _to_nullable_int(col("weight"))
-
-    df = pd.DataFrame({
-        "race_id": race_id,
-        "race_date": race_date.dt.strftime("%Y-%m-%d"),
-        "racecourse": racecourse,
-        "race_number": race_number,
-        "race_name": col("race_name"),
-        "distance": _to_nullable_int(col("distance")),
-        "surface": col("surface"),
-        "going": col("going"),
-        "finishing_position": _to_nullable_int(col("finishing_position")),
-        "horse_id": horse_id,
-        "horse_name": col("horse_name"),
-        "jockey": col("jockey"),
-        "trainer": col("trainer"),
-        "weight": weight,
-        # weight_change は元データに無いので 0 固定
-        "weight_change": 0,
-        "time": time_str,
-        "last_3f": pd.to_numeric(col("last_3f"), errors="coerce"),
-        # popularity は元データに無いので NaN
-        "popularity": pd.Series([pd.NA] * len(raw), dtype="Int64"),
-        "odds": pd.to_numeric(col("odds"), errors="coerce"),
-    })
-    return df
+    return parse_jra_van_dataframe(raw)
 
 
 # =====================================================================

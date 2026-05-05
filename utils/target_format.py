@@ -1,0 +1,235 @@
+"""
+TARGET frontier JV (JRA-VAN DataLab) の RA+SE+単勝オッズ 結合 CSV を
+共通パーサで扱うためのモジュール。
+
+過去データ取り込み (scripts/csv_to_parquet.py) と
+当日出馬表アップロード (data_loader.load_race_card) の両方から参照する。
+
+フォーマット仕様:
+- ヘッダー行なし
+- 文字コード: Shift_JIS (cp932)
+- 52列の位置依存フォーマット
+- 結果列(着順 / タイム / 上がり3F 等)が空の "morning" 形式と、
+  全列埋まっている過去データの両方に対応(欠損は NaN/空文字 のまま伝搬)
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+
+# JV-Link 形式の期待される列数
+JV_LINK_EXPECTED_COLS = 52
+
+# 列インデックス → 内部フィールド名(本MVPで使う列のみ)
+#
+# 確定済みマッピング:
+#   [0-2]   年・月・日
+#   [3]     開催回
+#   [4]     競馬場(漢字)
+#   [5]     開催日次
+#   [6]     レース番号    ← race_number
+#   [7]     レース名
+#   [8]     出走頭数
+#   [9]     トラック種別(芝/ダ/障)
+#   [10]    内/外
+#   [11]    距離(m)
+#   [12]    馬場状態
+#   [13]    馬名
+#   [14]    性別
+#   [15]    年齢
+#   [16]    騎手
+#   [17]    斤量
+#   [18]    馬番
+#   [19]    着順(2桁ゼロ埋め文字列、例 '01' = 1着)
+#   [22-23] 着差・着差秒
+#   [25]    走破タイム(秒、例: 70.3 = 1分10秒3)
+#   [26]    走破タイム(別表現、1103 = 1分10秒3)
+#   [27-31] 時計指数・通過順
+#   [32]    上がり3F(秒)
+#   [33]    馬体重(kg)
+#   [34]    調教師
+#   [35]    厩舎所属(栗東/美浦)
+#   [40]    馬登録番号(10桁)
+#   [43]    父、 [44] 母、 [45] 母父
+#   [51]    単勝オッズ
+RACES_COL: dict[str, int] = {
+    "year":                0,
+    "month":               1,
+    "day":                 2,
+    "racecourse":          4,
+    "race_number":         6,
+    "race_name":           7,
+    "surface":             9,
+    "distance":           11,
+    "going":              12,
+    "horse_name":         13,
+    "jockey":             16,
+    "finishing_position": 19,
+    "time_seconds":       25,
+    "last_3f":            32,
+    "weight":             33,
+    "trainer":            34,
+    "horse_id":           40,
+    "sire":               43,
+    "dam":                44,
+    "dam_sire":           45,
+    "odds":               51,
+}
+
+# 検証用 JRA中央10場
+KNOWN_COURSES: set[str] = {
+    "東京", "中山", "京都", "阪神", "小倉", "福島", "新潟", "函館", "札幌", "中京",
+}
+
+
+# =====================================================================
+# 単純ヘルパ
+# =====================================================================
+
+def secs_to_time_str(secs) -> str:
+    """秒数を 'M:SS.SS' 形式に変換(NaN は空文字)。"""
+    if pd.isna(secs):
+        return ""
+    minutes = int(secs // 60)
+    sec = secs - minutes * 60
+    if minutes > 0:
+        return f"{minutes}:{sec:05.2f}"
+    return f"{sec:.2f}"
+
+
+def to_nullable_int(s: pd.Series) -> pd.Series:
+    """文字列Series → Int64(欠損は <NA>、小数値は四捨五入)。"""
+    f = pd.to_numeric(s, errors="coerce")
+    return f.round().astype("Int64")
+
+
+# =====================================================================
+# パーサ本体
+# =====================================================================
+
+def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    52列のヘッダー無し JV-Link CSV を pandas で読んだ raw DataFrame
+    (header=None / dtype=str を期待) を、アプリ内部スキーマに変換する。
+
+    結果列(着順 / タイム / 上3F)が空でも非空でも、両方で動く。
+    空のセルは NaN/<NA>/空文字 として伝搬する。
+
+    返す列: race_id, race_date, racecourse, race_number, race_name,
+            distance, surface, going, finishing_position,
+            horse_id, horse_name, jockey, trainer, weight, weight_change,
+            time, last_3f, popularity, odds
+    """
+    if raw.shape[1] != JV_LINK_EXPECTED_COLS:
+        raise ValueError(
+            f"JV-Link 形式は {JV_LINK_EXPECTED_COLS} 列ですが、"
+            f"{raw.shape[1]} 列でした。フォーマットを確認してください。"
+        )
+
+    # 列インデックスから値を取り出すヘルパ(strip 済み文字列)
+    def col(name: str) -> pd.Series:
+        return raw[RACES_COL[name]].fillna("").astype(str).str.strip()
+
+    # ----- 日付組み立て(年は 20xx 想定) -----
+    yy = col("year").str.zfill(2)
+    mm = col("month").str.zfill(2)
+    dd = col("day").str.zfill(2)
+    race_date = pd.to_datetime("20" + yy + "-" + mm + "-" + dd,
+                               format="%Y-%m-%d", errors="coerce")
+
+    # ----- 基本列 -----
+    racecourse = col("racecourse")
+    race_number = to_nullable_int(col("race_number"))
+
+    # race_id = "R" + yyyymmdd + "-" + 場頭文字 + zfill2(R)
+    # 例: R20230722-札01 / R20260503-新01
+    race_id = (
+        "R"
+        + race_date.dt.strftime("%Y%m%d").fillna("00000000")
+        + "-"
+        + racecourse.str[:1]
+        + race_number.astype("string").str.zfill(2)
+    )
+
+    # 走破タイム: 秒数(70.3)→ "1:10.30"。空セルは "" のまま
+    time_secs = pd.to_numeric(col("time_seconds"), errors="coerce")
+    time_str = time_secs.apply(secs_to_time_str)
+
+    # 馬登録番号: 10桁ゼロ埋め(JRA-VAN は10桁が標準)
+    horse_id = col("horse_id").str.zfill(10)
+
+    return pd.DataFrame({
+        "race_id":            race_id,
+        "race_date":          race_date.dt.strftime("%Y-%m-%d"),
+        "racecourse":         racecourse,
+        "race_number":        race_number,
+        "race_name":          col("race_name"),
+        "distance":           to_nullable_int(col("distance")),
+        "surface":            col("surface"),
+        "going":              col("going"),
+        "finishing_position": to_nullable_int(col("finishing_position")),
+        "horse_id":           horse_id,
+        "horse_name":         col("horse_name"),
+        "jockey":             col("jockey"),
+        "trainer":            col("trainer"),
+        "weight":             to_nullable_int(col("weight")),
+        # weight_change は元データに無い → 0 固定(prediction_logic は未使用)
+        "weight_change":      0,
+        "time":               time_str,
+        "last_3f":            pd.to_numeric(col("last_3f"), errors="coerce"),
+        # popularity も同上 → NaN
+        "popularity":         pd.Series([pd.NA] * len(raw), dtype="Int64"),
+        "odds":               pd.to_numeric(col("odds"), errors="coerce"),
+    })
+
+
+# =====================================================================
+# 形式・エンコーディング判定(アップロード時に使う)
+# =====================================================================
+
+def is_jra_van_headerless(text: str) -> bool:
+    """
+    1行目の中身を見て、JV-Link 52列ヘッダーなし形式か判定する。
+
+    判定ルール:
+    - カンマ区切りで列数が 52 ちょうど
+    - 先頭3列(年・月・日)がそれぞれ1〜2桁の数字
+
+    上記を満たさなければ「ヘッダー付き普通CSV」とみなす。
+    """
+    if not text:
+        return False
+    first_line = text.split("\n", 1)[0]
+    # 末尾 \r を除去
+    first_line = first_line.rstrip("\r")
+    fields = first_line.split(",")
+    if len(fields) != JV_LINK_EXPECTED_COLS:
+        return False
+    for i in (0, 1, 2):
+        v = fields[i].strip().strip('"')
+        if not v.isdigit() or len(v) > 2:
+            return False
+    return True
+
+
+def decode_with_fallback(raw_bytes: bytes) -> tuple[str, str]:
+    """
+    バイト列を utf-8-sig → utf-8 → shift_jis → cp932 の順で復号試行。
+
+    成功した最初のエンコーディングで (decoded_text, encoding_name) を返す。
+    全部失敗した場合は UnicodeDecodeError を送出。
+    """
+    encodings = ["utf-8-sig", "utf-8", "shift_jis", "cp932"]
+    last_err: UnicodeDecodeError | None = None
+    for enc in encodings:
+        try:
+            return raw_bytes.decode(enc), enc
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+    # 4種類とも失敗した場合のみここに来る
+    assert last_err is not None
+    raise UnicodeDecodeError(
+        last_err.encoding, last_err.object, last_err.start, last_err.end,
+        f"いずれの文字コード({', '.join(encodings)})でも復号できませんでした",
+    )
