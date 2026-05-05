@@ -175,6 +175,26 @@ if race_card_df is not None and historical is not None:
 
         st.success(f"予想完了({len(results)} レース)")
 
+        # 馬番(horse_number)は出馬表側にあるので、horse_id → 馬番 の引きを作る
+        # 出馬表に horse_number 列が無ければ空 dict にして、後段で "—" 表示にフォールバック
+        if "horse_number" in race_card_df.columns:
+            hn_map = dict(zip(
+                race_card_df["horse_id"].astype(str),
+                race_card_df["horse_number"],
+            ))
+        else:
+            hn_map = {}
+
+        def _fmt_hn(horse_id: str) -> str:
+            """馬番をテーブル表示用に整形(欠損は '—')"""
+            v = hn_map.get(str(horse_id))
+            if v is None or pd.isna(v) or v == "":
+                return "—"
+            try:
+                return str(int(v))
+            except (ValueError, TypeError):
+                return str(v)
+
         # ダウンロード用フラットDataFrameを構築
         download_rows: list[dict] = []
         for race_id, preds in results.items():
@@ -189,6 +209,7 @@ if race_card_df is not None and historical is not None:
                     "distance": race_info_row.get("distance", ""),
                     "surface": race_info_row.get("surface", ""),
                     "印": pred.mark,
+                    "馬番": _fmt_hn(pred.horse_id),
                     "horse_id": pred.horse_id,
                     "horse_name": pred.horse_name,
                     "jockey": pred.jockey,
@@ -197,13 +218,11 @@ if race_card_df is not None and historical is not None:
                 })
         download_df = pd.DataFrame(download_rows)
 
-        # ===== CSVダウンロードボタン =====
-        csv_buffer = io.StringIO()
-        # Excel で開いた時に文字化けしないよう BOM 付き UTF-8 で出力
-        download_df.to_csv(csv_buffer, index=False)
+        # ===== CSVダウンロードボタン(UTF-8-sig で BOM 付与、Excel互換) =====
+        csv_bytes = download_df.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
             label="📥 予想結果を CSV でダウンロード",
-            data=("﻿" + csv_buffer.getvalue()).encode("utf-8"),
+            data=csv_bytes,
             file_name="prediction_results.csv",
             mime="text/csv",
         )
@@ -225,6 +244,7 @@ if race_card_df is not None and historical is not None:
                 top_rows = [
                     {
                         "印": p.mark,
+                        "馬番": _fmt_hn(p.horse_id),
                         "馬名": p.horse_name,
                         "騎手": p.jockey,
                         "スコア": p.score,
@@ -238,7 +258,8 @@ if race_card_df is not None and historical is not None:
                 # 各馬の理由(クリックで展開可能)
                 st.markdown("**全頭の評価詳細**")
                 for p in preds:
-                    label = (f"{p.mark} " if p.mark else "　 ") + f"{p.horse_name}({p.jockey})  スコア {p.score}"
+                    mark_part = f"{p.mark} " if p.mark else "　 "
+                    label = f"{mark_part}{_fmt_hn(p.horse_id)} {p.horse_name}({p.jockey})  スコア {p.score}"
                     with st.expander(label, expanded=False):
                         if p.reasons:
                             for r in p.reasons:

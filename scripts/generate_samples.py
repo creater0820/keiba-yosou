@@ -78,8 +78,13 @@ def make_horse_id(n: int) -> str:
 
 
 def write_csv(path: str, rows: list[dict], fieldnames: list[str]) -> None:
-    """CSVファイル出力 (UTF-8、BOMなし、改行LF)"""
-    with open(path, "w", encoding="utf-8", newline="") as f:
+    """
+    CSVファイル出力。
+    - 文字コード: UTF-8-sig (BOM 付き、Excel 互換)
+    - 改行: LF (Python標準動作)
+    プロジェクト規約: 出力CSVは UTF-8-sig 統一(README.md の「CSV エンコーディング規約」参照)。
+    """
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
@@ -208,6 +213,7 @@ for race_no in [1, 2, 3]:
             "distance": distance,
             "surface": surface,
             "going": going,
+            "horse_number": idx + 1,                     # 馬番(1〜12、ランダムシャッフル後の順)
             "horse_id": h["horse_id"],
             "horse_name": h["horse_name"],
             "jockey": random.choice(JOCKEYS),
@@ -244,7 +250,7 @@ write_csv(
     os.path.join(SAMPLES_DIR, "sample_race_card.csv"),
     race_card,
     ["race_id", "race_date", "racecourse", "race_number", "race_name",
-     "distance", "surface", "going", "horse_id", "horse_name",
+     "distance", "surface", "going", "horse_number", "horse_id", "horse_name",
      "jockey", "trainer", "weight", "weight_change", "popularity", "odds"],
 )
 
