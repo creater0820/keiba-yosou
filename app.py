@@ -280,15 +280,21 @@ if (predictions_in_session is not None
     st.subheader("レースごとの予想")
     for race_id, preds in display_predictions.items():
         race_info_row = display_df[display_df["race_id"] == race_id].iloc[0]
-        # エクスパンダのタイトルにレース概要を入れる
+        # 本命馬(◎)を 1 頭抽出してタイトルにプレビュー表示
+        # — クリック前から注目馬がわかるのでスクロール量を抑えつつ可読性を上げる
+        honmei_pred = next((p for p in preds if p.mark == "◎"), None)
+        honmei_text = f" — ◎ {honmei_pred.horse_name}" if honmei_pred is not None else ""
         title = (
             f"【{race_info_row.get('racecourse', '')} "
             f"{race_info_row.get('race_number', '')}R】 "
             f"{race_info_row.get('race_name', '')} "
             f"{race_info_row.get('distance', '')}m "
             f"{race_info_row.get('surface', '')}"
+            f"{honmei_text}"
         )
-        with st.expander(title, expanded=True):
+        # 既定で閉じた状態にして、ユーザがクリックで展開する運用にする。
+        # 36 レース全部開きっぱなしだとスクロール量が膨大になるため。
+        with st.expander(title, expanded=False):
             # 推奨馬テーブル(印付き = 上位4頭)を上部に表示
             top_rows = [
                 {
