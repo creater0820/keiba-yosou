@@ -67,3 +67,23 @@ def get_recent_runs_for_race(
             runs.append(None)
         result[hid] = runs
     return result
+
+
+def get_recent_n_runs(
+    horse_id: str,
+    target_race_date,
+    historical_df: pd.DataFrame,
+    n: int = 5,
+) -> list[dict | None]:
+    """
+    単一馬の直近 N 走を返す(デバッグ・スポットチェック用ラッパ)。
+
+    内部では get_recent_runs_for_race(キャッシュ済み) を呼ぶだけ。
+    target_race_date は str / pd.Timestamp / datetime のいずれでも可。
+
+    戻り値: [前走, 2走前, ..., N走前] 直近順、不足は None で末尾パディング。
+    """
+    target_iso = pd.Timestamp(target_race_date).strftime("%Y-%m-%d")
+    return get_recent_runs_for_race(
+        (str(horse_id),), target_iso, historical_df, n=n,
+    )[str(horse_id)]

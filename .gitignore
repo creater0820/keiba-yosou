@@ -67,3 +67,6 @@ data/uploads/*
 
 # Streamlit のシークレット
 .streamlit/secrets.toml
+
+# 動作確認用のスクリーンショット(Playwright 等で生成)
+screenshots/
