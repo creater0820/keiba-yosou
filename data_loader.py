@@ -20,7 +20,11 @@ from typing import IO
 
 import pandas as pd
 
-from utils.target_format import decode_with_fallback
+from utils.target_format import (
+    decode_with_fallback,
+    is_jra_van_headerless,
+    parse_jra_van_dataframe,
+)
 
 # ===== 過去データ読み込み =====
 
@@ -124,11 +128,19 @@ def load_race_card(uploaded_file: IO | str | Path) -> pd.DataFrame:
     """
     アップロードされた当日出馬表 CSV を DataFrame に変換する。
 
+    対応する形式:
+    1. ヘッダー付き普通CSV (列名が race_id, race_date, ... 等の英名)
+       → そのまま pd.read_csv で読む。
+    2. TARGET frontier JV (JRA-VAN) の RA+SE+単勝オッズ 結合 CSV
+       (52列・ヘッダーなし・Shift_JIS が典型)
+       → 位置依存マッピングで内部スキーマに変換。
+
     エンコーディングは utf-8-sig → utf-8 → shift_jis → cp932 の順で試行する。
     全部失敗したら ValueError(日本語メッセージ)を送出。
     """
     raw_bytes = _read_raw_bytes(uploaded_file)
 
+    # 1) エンコーディング自動判定
     try:
         text, _encoding = decode_with_fallback(raw_bytes)
     except UnicodeDecodeError as e:
@@ -137,6 +149,18 @@ def load_race_card(uploaded_file: IO | str | Path) -> pd.DataFrame:
             "UTF-8 / Shift_JIS / cp932 のいずれかで保存し直してください。"
         ) from e
 
+    # 2) TARGET 52列ヘッダーなし形式かどうかを1行目で判定
+    if is_jra_van_headerless(text):
+        # ヘッダーなし → 全列文字列で読み込み、内部スキーマへ変換
+        raw_df = pd.read_csv(
+            io.StringIO(text),
+            header=None,
+            dtype=str,
+            low_memory=False,
+        )
+        return parse_jra_van_dataframe(raw_df)
+
+    # 3) ヘッダー付き普通CSV(既存サンプルや日本語列名 CSV はこのパス)
     return pd.read_csv(io.StringIO(text))
 
 
