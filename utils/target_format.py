@@ -52,7 +52,8 @@ JV_LINK_EXPECTED_COLS = 52
 #   [33]    馬体重(kg)
 #   [34]    調教師
 #   [35]    厩舎所属(栗東/美浦)
-#   [40]    馬登録番号(10桁)
+#   [37]    血統登録番号(8桁、馬を stable に識別)  ← horse_id
+#   [40]    出走エントリ通し番号(10桁、レース毎に増えるため馬同一性には使えない)
 #   [43]    父、 [44] 母、 [45] 母父
 #   [51]    単勝オッズ
 RACES_COL: dict[str, int] = {
@@ -76,7 +77,9 @@ RACES_COL: dict[str, int] = {
     "last_3f":            32,
     "weight":             33,
     "trainer":            34,
-    "horse_id":           40,
+    # horse_id は [37] 血統登録番号(8桁、stable)。同じ馬が複数レースで同じ値を持つ。
+    # かつて [40] を使っていたが per-race で変わる通し番号と判明 → 過去履歴の引き当てに使えなかった。
+    "horse_id":           37,
     "sire":               43,
     "dam":                44,
     "dam_sire":           45,
@@ -194,8 +197,8 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
     time_secs = pd.to_numeric(col("time_seconds"), errors="coerce")
     time_str = time_secs.apply(secs_to_time_str)
 
-    # 馬登録番号: 10桁ゼロ埋め(JRA-VAN は10桁が標準)
-    horse_id = col("horse_id").str.zfill(10)
+    # 血統登録番号: 8桁ゼロ埋め(年下2桁 + 6桁通し番号)
+    horse_id = col("horse_id").str.zfill(8)
 
     # 馬番(horse_number)の per-race offset 正規化:
     # JV-Link [24] は概ね 1..N の置換だが、一部のレース(主に古いデータ)では
