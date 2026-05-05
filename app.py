@@ -382,29 +382,55 @@ def get_historical(_schema_version: str = HISTORICAL_DATA_SCHEMA_VERSION) -> His
 st.title("🏇 競馬予想アプリ(本ロジック v1.0)")
 st.caption("当日の出馬表 CSV をアップロードして「予想実行」を押してください。")
 
+# 別ページ(ロジック説明 等)に遷移しても CSV を保持するため、
+# アップロード内容(bytes/name/hash)を session_state に永続化する。
+# Streamlit の file_uploader 単体ではページ遷移後に状態が空になるケースがある。
+SS_FILE_BYTES = "uploaded_csv_bytes"
+SS_FILE_NAME = "uploaded_csv_name"
+SS_FILE_HASH = "uploaded_csv_hash"
+
 uploaded = st.file_uploader(
     "当日出馬表 CSV をアップロード",
     type=["csv"],
     accept_multiple_files=False,
+    key="race_card_uploader",
     help="JV-Link または TARGET frontier JV からエクスポートした CSV を想定。",
 )
 
 race_card_df: pd.DataFrame | None = None
 source_name: str | None = None
 file_hash: str | None = None
+file_bytes: bytes | None = None
+restored_from_session = False
+
 if uploaded is not None:
+    # 新規アップロード(または同一セッション内の再表示) → セッションに保存
     file_bytes = uploaded.getvalue()
     file_hash = hashlib.md5(file_bytes).hexdigest()
+    source_name = uploaded.name
+    st.session_state[SS_FILE_BYTES] = file_bytes
+    st.session_state[SS_FILE_NAME] = source_name
+    st.session_state[SS_FILE_HASH] = file_hash
+elif st.session_state.get(SS_FILE_BYTES) is not None:
+    # 別ページから戻ってきた → uploader は空だが session に履歴あるので復元
+    file_bytes = st.session_state[SS_FILE_BYTES]
+    file_hash = st.session_state[SS_FILE_HASH]
+    source_name = st.session_state[SS_FILE_NAME]
+    restored_from_session = True
+
+# race_card_df を構築(新規 / 復元 共通)
+if file_bytes is not None:
     try:
-        race_card_df = load_race_card_cached(file_bytes, uploaded.name)
-        source_name = uploaded.name
+        race_card_df = load_race_card_cached(file_bytes, source_name or "uploaded.csv")
     except Exception as e:
         st.error(f"CSV の読み込みに失敗しました: {e}")
 
 # 別ファイルがアップロードされたら、前回の予想結果は破棄
 if file_hash is not None and st.session_state.get("predictions_for_file") != file_hash:
-    st.session_state.pop("all_predictions", None)
-    st.session_state.pop("predictions_for_file", None)
+    if uploaded is not None:
+        # 新規アップロードの時のみ予想を破棄(復元時は既存の予想を残したい)
+        st.session_state.pop("all_predictions", None)
+        st.session_state.pop("predictions_for_file", None)
 
 
 # =====================================================================
@@ -479,7 +505,19 @@ if race_card_df is not None:
         display_df = race_card_df[race_card_df["racecourse"] == selected_course].copy()
 
     course_suffix = f" / {selected_course}のみ表示中" if selected_course != "全場" else ""
-    st.success(f"読み込み完了: {source_name}{course_suffix}")
+    if restored_from_session:
+        msg_col, btn_col = st.columns([5, 1])
+        msg_col.info(
+            f"📂 セッションから復元: {source_name}{course_suffix}"
+            "(別ページから戻った時はアップロード履歴を再利用しています)"
+        )
+        if btn_col.button("🗑 クリア", help="アップロード履歴と予想結果を消す"):
+            for k in (SS_FILE_BYTES, SS_FILE_NAME, SS_FILE_HASH,
+                       "all_predictions", "predictions_for_file"):
+                st.session_state.pop(k, None)
+            st.rerun()
+    else:
+        st.success(f"読み込み完了: {source_name}{course_suffix}")
 
     summary = summarize_race_card(display_df)
     col1, col2 = st.columns(2)
