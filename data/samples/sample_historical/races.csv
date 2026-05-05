@@ -1,4 +1,4 @@
-race_id,race_date,racecourse,race_number,race_name,distance,surface,going,finishing_position,horse_id,horse_name,jockey,trainer,weight,weight_change,time,last_3f,popularity,odds
+﻿race_id,race_date,racecourse,race_number,race_name,distance,surface,going,finishing_position,horse_id,horse_name,jockey,trainer,weight,weight_change,time,last_3f,popularity,odds
 R20260414-中06,2026-04-14,中山,6,新馬,2100,ダート,稍重,8,H0014,メイショウアロー,川村翔太,池川泰寿,459,10,2:07.60,36.5,10,79.3
 R20260414-中06,2026-04-14,中山,6,新馬,2100,ダート,稍重,2,H0044,ダイワストーム,山口圭一,矢野芳人,491,2,2:07.65,36.2,1,66.7
 R20260414-中06,2026-04-14,中山,6,新馬,2100,ダート,稍重,13,H0092,マイネルファイト,吉村隼斗,須田尚介,431,10,2:05.78,36.4,4,102.4

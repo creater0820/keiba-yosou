@@ -57,6 +57,10 @@ Thumbs.db
 # data/historical/*.parquet は変換後成果物としてコミットする。
 data/raw/
 
+# 開発・動作確認用の派生CSV(scripts/extract_one_day.py 等の出力先)。
+# data/raw/ から再生成可能なので git に乗せない。
+data/test/
+
 # ユーザがアップロードした当日データ
 data/uploads/*
 !data/uploads/.gitkeep

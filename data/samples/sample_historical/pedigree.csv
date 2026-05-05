@@ -1,4 +1,4 @@
-horse_id,sire_line,broodmare_sire_line,inbreeding_score
+﻿horse_id,sire_line,broodmare_sire_line,inbreeding_score
 H0001,サンデーサイレンス系,ミスタープロスペクター系,2.72
 H0002,ミスタープロスペクター系,サンデーサイレンス系,1.99
 H0003,ノーザンダンサー系,サンデーサイレンス系,4.75

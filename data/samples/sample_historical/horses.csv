@@ -1,4 +1,4 @@
-horse_id,horse_name,sex,age,sire,dam,dam_sire,total_starts,wins,places,shows
+﻿horse_id,horse_name,sex,age,sire,dam,dam_sire,total_starts,wins,places,shows
 H0001,アドマイヤフラッシュ,牡,4,ロードキング,クロフネスパーク,メイショウブレイブ,23,1,0,11
 H0002,ダイワオーシャン,セ,3,テイエムドリーム,ロードスパーク,ナリタフラッシュ,4,0,0,0
 H0003,ヴィクトリアストーム,セ,6,キタサンシチー,ヒカルドリーム,ヴィクトリアプリンス,17,4,2,0
