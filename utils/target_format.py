@@ -46,8 +46,9 @@ JV_LINK_EXPECTED_COLS = 52
 #   [20]    着順(2桁ゼロ埋め、例 '01' = 1着)            ← finishing_position
 #   [21]    着順(同 [20] の複製、JV-Link が冗長に出力)
 #   [22-23] 着差・着差秒
-#   [24]    用途不明の 1..N 順位(かつて馬番と誤認していたが JRA 公式と
-#            ほぼ合わない。何らかのレース結果由来ランキングと推定)
+#   [24]    単勝人気(1〜N、レース内ユニーク。1=最も人気) ← popularity
+#            京都11R 天皇賞春で クロワデュノール=1 / アドマイヤテラ=2 /
+#            ヴェルテンベルク=12 と JRA 公式と完全一致を確認済み。
 #   [28]    1コーナー通過順位                          ← corner_1
 #   [29]    2コーナー通過順位                          ← corner_2
 #   [30]    3コーナー通過順位                          ← corner_3
@@ -93,6 +94,9 @@ RACES_COL: dict[str, int] = {
     # horse_id は [37] 血統登録番号(8桁、stable)。同じ馬が複数レースで同じ値を持つ。
     # かつて [40] を使っていたが per-race で変わる通し番号と判明 → 過去履歴の引き当てに使えなかった。
     "horse_id":           37,
+    # 単勝人気(1=最も人気)。JRA 公式の人気と一致するのは [24] のみ。
+    # かつて [24] を「馬番」「用途不明な順位」と誤分類していた経緯あり。
+    "popularity":         24,
     # コーナー通過順位(1〜4 コーナー、本ロジック v1.0 の脚質判定で使う)
     "corner_1":           28,
     "corner_2":           29,
@@ -275,7 +279,7 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
         "time":               time_str,
         "last_3f":            pd.to_numeric(col("last_3f"), errors="coerce"),
         # popularity も同上 → NaN
-        "popularity":         pd.Series([pd.NA] * len(raw), dtype="Int64"),
+        "popularity":         to_nullable_int(col("popularity")),
         "odds":               pd.to_numeric(col("odds"), errors="coerce"),
         # コーナー通過順位(0 や欠損は <NA>。JRA で 0 は記録なし扱い)
         "corner_1":           to_corner_position(col("corner_1")),

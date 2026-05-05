@@ -98,8 +98,13 @@ def _build_horse_mark_data(
     )
     # 前走着順 (rule_4 用)
     last_pos = get_last_finishing_positions(horse_ids, target_date, historical_df)
-    # 人気
-    pops = compute_popularities_from_odds(race_card_df["odds"])
+
+    # 人気: race_card_df の popularity 列を優先(JRA データの確定単勝人気)。
+    # 列が無い・全行欠損の場合のみ odds 昇順から再計算するフォールバック。
+    if "popularity" in race_card_df.columns and race_card_df["popularity"].notna().any():
+        pops = race_card_df["popularity"].reset_index(drop=True)
+    else:
+        pops = compute_popularities_from_odds(race_card_df["odds"]).reset_index(drop=True)
 
     horses: list[HorseMarkData] = []
     for idx, row in race_card_df.reset_index(drop=True).iterrows():
