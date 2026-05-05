@@ -68,10 +68,27 @@ _MATRIX_CSS = """
     font-size: 11px;
     color: rgba(255,255,255,0.7);
 }
+/* 着順背景色 (1-3=緑 / 4-6=黄 / 7-12=橙 / 13+=赤 / 出走なし=灰) */
+.recent-runs-matrix .pos-1-3    { background: #4CAF50; color: #fff; }
+.recent-runs-matrix .pos-4-6    { background: #FFC107; color: #000; }
+.recent-runs-matrix .pos-7-12   { background: #FF9800; color: #fff; }
+.recent-runs-matrix .pos-13plus { background: #F44336; color: #fff; }
+.recent-runs-matrix .pos-none   { background: #424242; color: #999; }
+/* サーフェス一致マーカー: ★(同 芝/ダ) / ★★(同 芝/ダ + 距離±200m) */
+.recent-runs-matrix .surface-match::after          { content: " ★";  color: #FFD700; }
+.recent-runs-matrix .surface-distance-match::after { content: " ★★"; color: #FFD700; }
+/* 凡例タグ */
 .recent-runs-matrix-legend {
     font-size: 11px;
     margin-top: 6px;
     color: rgba(255,255,255,0.7);
+}
+.recent-runs-matrix-legend .legend-tag {
+    display: inline-block;
+    padding: 2px 6px;
+    margin-right: 4px;
+    font-size: 11px;
+    border-radius: 2px;
 }
 </style>
 """
@@ -94,16 +111,48 @@ def _format_horse_label(mark: str, horse_number, horse_name: str) -> str:
     return f"{mark_part} {hn_str} {safe_name}"
 
 
-def _build_run_cell(run: dict | None, target_surface: str, target_distance: int) -> str:
-    """
-    1走分のセル HTML を組み立てる(縦に 着順 / コース距離 / 上がり3F の 3 行)。
+def _position_class(pos_value) -> str:
+    """着順値 → CSS クラス名(色分け用)。NaN や非数なら pos-none。"""
+    if pos_value is None or pd.isna(pos_value):
+        return "pos-none"
+    try:
+        p = int(pos_value)
+    except (ValueError, TypeError):
+        return "pos-none"
+    if p <= 3:
+        return "pos-1-3"
+    if p <= 6:
+        return "pos-4-6"
+    if p <= 12:
+        return "pos-7-12"
+    return "pos-13plus"
 
-    C1 段階: 色や ★ や 3F 強調はまだ無し。プレーンテキストで構造だけ確立。
+
+def _course_match_class(
+    run_surface: str, run_distance: int, target_surface: str, target_distance: int
+) -> str:
     """
+    今回レースとの「サーフェス一致」「距離一致」を表す CSS クラス。
+    - 同芝・同ダート + 距離±200m → "surface-distance-match" (★★)
+    - 同芝・同ダート              → "surface-match"          (★)
+    - 一致しない                  → ""                       (マーク無し)
+    """
+    if not run_surface or not target_surface or run_surface != target_surface:
+        return ""
+    if not run_distance or not target_distance:
+        # 距離不明なら一致のみ判定
+        return "surface-match"
+    if abs(run_distance - target_distance) <= 200:
+        return "surface-distance-match"
+    return "surface-match"
+
+
+def _build_run_cell(run: dict | None, target_surface: str, target_distance: int) -> str:
+    """1走分のセル HTML を組み立てる(縦に 着順 / コース距離 / 上がり3F の 3 行)。"""
     if run is None:
         return (
             '<td class="run-cell">'
-            '<div class="position">──</div>'
+            '<div class="position pos-none">──</div>'
             '<div class="course">出走なし</div>'
             '<div class="last3f">──</div>'
             "</td>"
@@ -118,6 +167,7 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
             pos_str = f"{int(pos)}着"
         except (ValueError, TypeError):
             pos_str = "──"
+    pos_cls = _position_class(pos)
 
     # ----- コース・距離 -----
     surface = str(run.get("surface", "") or "").strip()
@@ -127,6 +177,8 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
     except (ValueError, TypeError):
         distance = 0
     course_str = f"{surface}{distance}" if distance else surface or "──"
+    course_cls = _course_match_class(surface, distance, target_surface, target_distance)
+    course_class_attr = f"course {course_cls}".rstrip()
 
     # ----- 上がり3F -----
     last_3f = run.get("last_3f")
@@ -137,8 +189,8 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
 
     return (
         '<td class="run-cell">'
-        f'<div class="position">{html.escape(pos_str)}</div>'
-        f'<div class="course">{html.escape(course_str)}</div>'
+        f'<div class="position {pos_cls}">{html.escape(pos_str)}</div>'
+        f'<div class="{course_class_attr}">{html.escape(course_str)}</div>'
         f'<div class="last3f">{html.escape(last3f_str)}</div>'
         "</td>"
     )
@@ -211,10 +263,17 @@ def render_recent_runs_matrix(
 
     parts.append("</tbody></table>")
 
-    # ----- 凡例(C1 段階は最低限。C2 で色付き凡例に置き換え) -----
+    # ----- 凡例(着順カラーチップ + ★ サーフェスマッチの説明) -----
     parts.append(
         '<div class="recent-runs-matrix-legend">'
-        "凡例: 数字=着順 / 出走なし=── / 上がり3F は秒"
+        "凡例: "
+        '<span class="legend-tag pos-1-3">1-3着</span>'
+        '<span class="legend-tag pos-4-6">4-6着</span>'
+        '<span class="legend-tag pos-7-12">7-12着</span>'
+        '<span class="legend-tag pos-13plus">13着以下</span>'
+        '<span class="legend-tag pos-none">出走なし</span>'
+        " | <span style=\"color:#FFD700\">★</span> = 今回と同じ芝/ダ"
+        " / <span style=\"color:#FFD700\">★★</span> = 同 芝/ダ + 距離±200m"
         "</div>"
     )
 
