@@ -19,7 +19,6 @@ import datetime as dt
 import hashlib
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
 from data_loader import (
