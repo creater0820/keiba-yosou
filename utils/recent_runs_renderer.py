@@ -68,19 +68,25 @@ _MATRIX_CSS = """
     font-size: 11px;
     color: rgba(255,255,255,0.7);
 }
-/* 着順背景色 (1-3=緑 / 4-6=黄 / 7-12=橙 / 13+=赤 / 出走なし=灰) */
-.recent-runs-matrix .pos-1-3    { background: #4CAF50; color: #fff; }
-.recent-runs-matrix .pos-4-6    { background: #FFC107; color: #000; }
-.recent-runs-matrix .pos-7-12   { background: #FF9800; color: #fff; }
-.recent-runs-matrix .pos-13plus { background: #F44336; color: #fff; }
-.recent-runs-matrix .pos-none   { background: #424242; color: #999; }
-/* サーフェス一致マーカー: ★(同 芝/ダ) / ★★(同 芝/ダ + 距離±200m) */
-.recent-runs-matrix .surface-match::after          { content: " ★";  color: #FFD700; }
-.recent-runs-matrix .surface-distance-match::after { content: " ★★"; color: #FFD700; }
-/* 上がり3F の評価別文字スタイル(33秒台前半=好末脚 / 35秒台以降=遅い) */
-.recent-runs-matrix .last3f-fast { font-weight: bold; color: #66BB6A; }
-.recent-runs-matrix .last3f-slow { color: #999;      font-weight: 300; }
-/* 凡例タグ */
+/* 着順クラス(色塗り廃止 — 構造保持のためクラスは残し、見た目は背景・文字色とも既定) */
+.recent-runs-matrix .pos-1-3,
+.recent-runs-matrix .pos-4-6,
+.recent-runs-matrix .pos-7-12,
+.recent-runs-matrix .pos-13plus,
+.recent-runs-matrix .pos-none {
+    background: transparent;
+    color: inherit;
+}
+/* サーフェス一致マーカー(色なし): 同芝/ダ → ★、同芝/ダ + 距離±200m → ★★ */
+.recent-runs-matrix .surface-match::after          { content: " ★";  color: inherit; }
+.recent-runs-matrix .surface-distance-match::after { content: " ★★"; color: inherit; }
+/* 上がり3F の評価強調も色塗りなしで素のテキストに */
+.recent-runs-matrix .last3f-fast,
+.recent-runs-matrix .last3f-slow {
+    color: inherit;
+    font-weight: inherit;
+}
+/* 凡例(色チップなし、テキストのみ) */
 .recent-runs-matrix-legend {
     font-size: 11px;
     margin-top: 6px;
@@ -88,9 +94,12 @@ _MATRIX_CSS = """
 }
 .recent-runs-matrix-legend .legend-tag {
     display: inline-block;
-    padding: 2px 6px;
+    padding: 0 4px;
     margin-right: 4px;
     font-size: 11px;
+    background: transparent;
+    color: inherit;
+    border: 1px solid rgba(255,255,255,0.2);
     border-radius: 2px;
 }
 </style>
@@ -273,17 +282,17 @@ def render_recent_runs_matrix(
 
     parts.append("</tbody></table>")
 
-    # ----- 凡例(着順カラーチップ + ★ サーフェスマッチの説明) -----
+    # ----- 凡例(色塗り廃止、★ も既定色) -----
     parts.append(
         '<div class="recent-runs-matrix-legend">'
         "凡例: "
-        '<span class="legend-tag pos-1-3">1-3着</span>'
-        '<span class="legend-tag pos-4-6">4-6着</span>'
-        '<span class="legend-tag pos-7-12">7-12着</span>'
-        '<span class="legend-tag pos-13plus">13着以下</span>'
-        '<span class="legend-tag pos-none">出走なし</span>'
-        " | <span style=\"color:#FFD700\">★</span> = 今回と同じ芝/ダ"
-        " / <span style=\"color:#FFD700\">★★</span> = 同 芝/ダ + 距離±200m"
+        '<span class="legend-tag">1-3着</span>'
+        '<span class="legend-tag">4-6着</span>'
+        '<span class="legend-tag">7-12着</span>'
+        '<span class="legend-tag">13着以下</span>'
+        '<span class="legend-tag">出走なし</span>'
+        " | ★ = 今回と同じ芝/ダ"
+        " / ★★ = 同 芝/ダ + 距離±200m"
         "</div>"
     )
 
