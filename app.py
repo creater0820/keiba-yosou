@@ -15,8 +15,6 @@ Streamlit エントリーポイント。
 
 from __future__ import annotations
 
-import io
-
 import pandas as pd
 import streamlit as st
 
@@ -77,11 +75,7 @@ uploaded = st.file_uploader(
     help="JV-Link または TARGET frontier JV からエクスポートした CSV を想定。",
 )
 
-# サンプルモードのプレースホルダ(次コミットでブランチごと撤去)。
-# トグル UI を消した今、この変数は常に False。
-use_sample = False
-
-# DataFrame に変換するソース(ユーザのアップロード優先、無ければサンプル)
+# 出馬表 CSV を DataFrame に変換
 race_card_df: pd.DataFrame | None = None
 source_name: str | None = None
 if uploaded is not None:
@@ -90,12 +84,6 @@ if uploaded is not None:
         source_name = uploaded.name
     except Exception as e:
         st.error(f"CSV の読み込みに失敗しました: {e}")
-elif use_sample:
-    try:
-        race_card_df = load_race_card("data/samples/sample_race_card.csv")
-        source_name = "sample_race_card.csv"
-    except Exception as e:
-        st.error(f"サンプル CSV の読み込みに失敗しました: {e}")
 
 
 # =====================================================================
