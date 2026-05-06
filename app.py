@@ -51,6 +51,70 @@ st.set_page_config(
 
 
 # =====================================================================
+# 文字サイズ調整(お父様の老眼配慮、4 段階切替)
+# =====================================================================
+# サイドバー最上部のスライダで session_state["font_scale"] を変更すると、
+# 下記の CSS が再注入されて UI 全体の文字サイズが切り替わる。
+# 「標準」では CSS を注入せず、Streamlit デフォルトを維持する。
+FONT_SCALE_OPTIONS = ["標準", "大", "特大", "最大"]
+
+FONT_SCALE_CSS: dict[str, str] = {
+    "標準": "",
+    "大": """
+        <style>
+        html { font-size: 17.6px; }
+        [data-testid="stSidebar"] { font-size: 15px; }
+        .recent-runs-matrix { font-size: 13px; }
+        .recent-runs-matrix .horse-label { font-size: 14px; min-width: 260px; }
+        .recent-runs-matrix .run-cell { min-width: 120px; }
+        .recent-runs-matrix .run-cell .position { font-size: 14px; }
+        .recent-runs-matrix .run-cell .course,
+        .recent-runs-matrix .run-cell .last3f,
+        .recent-runs-matrix .run-cell .jockey { font-size: 12px; }
+        .recent-runs-matrix-legend { font-size: 12px; }
+        </style>
+    """,
+    "特大": """
+        <style>
+        html { font-size: 19.2px; }
+        [data-testid="stSidebar"] { font-size: 17px; }
+        .recent-runs-matrix { font-size: 14px; }
+        .recent-runs-matrix .horse-label { font-size: 16px; min-width: 290px; }
+        .recent-runs-matrix .run-cell { min-width: 130px; }
+        .recent-runs-matrix .run-cell .position { font-size: 16px; }
+        .recent-runs-matrix .run-cell .course,
+        .recent-runs-matrix .run-cell .last3f,
+        .recent-runs-matrix .run-cell .jockey { font-size: 13px; }
+        .recent-runs-matrix-legend { font-size: 13px; }
+        </style>
+    """,
+    "最大": """
+        <style>
+        html { font-size: 20.8px; }
+        [data-testid="stSidebar"] { font-size: 18px; }
+        .recent-runs-matrix { font-size: 15px; }
+        .recent-runs-matrix .horse-label { font-size: 18px; min-width: 320px; }
+        .recent-runs-matrix .run-cell { min-width: 140px; }
+        .recent-runs-matrix .run-cell .position { font-size: 18px; }
+        .recent-runs-matrix .run-cell .course,
+        .recent-runs-matrix .run-cell .last3f,
+        .recent-runs-matrix .run-cell .jockey { font-size: 14px; }
+        .recent-runs-matrix-legend { font-size: 14px; }
+        </style>
+    """,
+}
+
+# session_state からスケールを取得して CSS を注入(set_page_config の直後)。
+# スライダ操作時は Streamlit が自動 rerun するので、次回 rerun でこの行が
+# 新しい値で再評価され CSS が更新される。
+_current_font_scale = st.session_state.get("font_scale", "標準")
+if _current_font_scale not in FONT_SCALE_CSS:
+    _current_font_scale = "標準"
+if FONT_SCALE_CSS[_current_font_scale]:
+    st.markdown(FONT_SCALE_CSS[_current_font_scale], unsafe_allow_html=True)
+
+
+# =====================================================================
 # サイドバー用ヘルパ(競馬場フィルタのラベル組み立て・パース)
 # =====================================================================
 WEEKDAY_JA = ["月", "火", "水", "木", "金", "土", "日"]
@@ -534,6 +598,21 @@ if file_hash is not None and st.session_state.get("predictions_for_file") != fil
 # サイドバー: アプリ説明 + 競馬場フィルタ + 過去データ統計
 # =====================================================================
 with st.sidebar:
+    # ----- 文字サイズ調整スライダ(最上部、常時表示) -----
+    # session_state["font_scale"] に保存され、レース絞り込みや予想実行を跨いで
+    # 維持される。スクリプト先頭の CSS 注入が次回 rerun 時に新しい値で
+    # 再評価される。
+    st.subheader("🔤 文字サイズ")
+    st.select_slider(
+        label="表示倍率",
+        options=FONT_SCALE_OPTIONS,
+        value=st.session_state.get("font_scale", "標準"),
+        key="font_scale",
+        label_visibility="collapsed",
+        help="老眼配慮の段階調整。「標準」=現行サイズ、最大で約 1.3 倍。",
+    )
+    st.divider()
+
     st.title("🏇 競馬予想アプリ")
     st.caption("JRA中央競馬・本ロジック v1.0")
 
