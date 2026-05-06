@@ -41,11 +41,15 @@ from utils.judgment_engine import (
     WideCandidate,
     compute_popularities_from_odds,
     determine_main_pick,
+    determine_main_pick_v2,
     extract_wide_candidates,
+    extract_wide_candidates_v2,
     get_last_finishing_positions,
 )
 from utils.onmark_rules import collect_onmarks
 from utils.race_history import determine_running_style, get_recent_runs_for_race
+from utils.rating_engine import HorseRating, compute_horse_rating
+from utils.rating_rules import HONMEI_RATING_THRESHOLD
 
 
 # ==================================================================
@@ -65,11 +69,16 @@ class HorsePrediction:
 
 
 # ==================================================================
-# v1.0 戻り値型
+# v1.0 / v1.1 戻り値型
 # ==================================================================
 @dataclass
 class RacePrediction:
-    """v1.0 1レース分の予想結果。app.py のレンダラへの入力。"""
+    """1レース分の予想結果。app.py のレンダラへの入力。
+
+    Phase 6 で rating モードを追加。logic_mode="rating" のとき
+    horse_ratings に HorseRating のリストが、logic_mode="onmark" のとき
+    horses に HorseMarkData のリストが入る(両方同時に空でない場合あり)。
+    """
     race_id: str
     race_meta: dict                    # {racecourse, race_number, race_name, distance, surface, going, post_time}
     horses: list[HorseMarkData]        # 全馬の○マーク + メタ(人気・脚質・枠番)
@@ -77,6 +86,18 @@ class RacePrediction:
     wide_candidates: list[WideCandidate]
     betting: BettingPlan
     demerit_entries: list[DemeritEntry]
+    # Phase 6: rating モード固有
+    logic_mode: str = "onmark"                        # "onmark" or "rating"
+    horse_ratings: list[HorseRating] = field(default_factory=list)
+
+
+# ==================================================================
+# Phase 6: ロジックモード切替フラグ
+# ==================================================================
+# "rating" にすると本ロジック v1.1(rating-based、≥100で◎)、
+# "onmark" にすると本ロジック v1.0(○マーク、≥5で◎)。
+# UI 側は predict_all_races_cached の戻り値内 race.logic_mode を見て分岐。
+LOGIC_MODE: str = "rating"
 
 
 # ==================================================================
@@ -168,7 +189,7 @@ def predict_race_v1(
     historical: HistoricalData | pd.DataFrame,
     target_date: str | None = None,
 ) -> RacePrediction:
-    """1レース分の v1.0 予想を実行する。"""
+    """1レース分の v1.0 予想を実行する(○マーク方式)。"""
     if isinstance(historical, HistoricalData):
         hist_df = historical.races
     else:
@@ -206,18 +227,124 @@ def predict_race_v1(
         wide_candidates=wides,
         betting=betting,
         demerit_entries=judgment.demerit_entries,
+        logic_mode="onmark",
     )
+
+
+def predict_race_v2(
+    race_card_df: pd.DataFrame,
+    historical: HistoricalData | pd.DataFrame,
+    target_date: str | None = None,
+) -> RacePrediction:
+    """1レース分の v1.1 予想を実行する(rating 方式、≥100 で ◎)。
+
+    内部ロジック:
+    1. 各馬の HorseMarkData を組み立て(基本属性 + 直近5走履歴)
+    2. その馬の今日の斤量を race_card から取得
+    3. compute_horse_rating で C/D/E/F1/F2/F3 を評価して total_rating
+    4. determine_main_pick_v2 (≥100 で◎、減点 B1/B2 適用、準◎ fallback)
+    5. extract_wide_candidates_v2 (A2-A5 で最大3頭)
+    6. 買い目生成は既存 v1 ヘルパを再利用(HorseMarkData 互換のため
+       馬基本情報は HorseMarkData 経由で渡す)
+    """
+    if isinstance(historical, HistoricalData):
+        hist_df = historical.races
+    else:
+        hist_df = historical
+
+    meta = _build_race_meta(race_card_df)
+    if target_date is None:
+        target_date = meta.get("race_date", "")
+
+    # 1) 馬基本情報(○マークなしで構築) — 後段の rating 計算で属性のみ使う
+    horses_v1 = _build_horse_mark_data(race_card_df, hist_df, target_date)
+
+    # 2) 直近5走を取得(rating engine への入力)
+    horse_ids = [h.horse_id for h in horses_v1]
+    history = get_recent_runs_for_race(
+        tuple(horse_ids), target_date, hist_df, n=5,
+    )
+
+    # 3) 当日斤量(race_card_df の carry_weight 列から取得)
+    carry_by_id: dict[str, float | None] = {}
+    if "carry_weight" in race_card_df.columns:
+        for _, row in race_card_df.iterrows():
+            try:
+                cw = float(row["carry_weight"]) if pd.notna(row["carry_weight"]) else None
+            except (ValueError, TypeError):
+                cw = None
+            carry_by_id[str(row["horse_id"])] = cw
+
+    # 4) 各馬の rating を計算
+    horse_ratings: list[HorseRating] = []
+    for h in horses_v1:
+        runs = history.get(h.horse_id, [None] * 5)
+        rating = compute_horse_rating(
+            horse_id=h.horse_id,
+            horse_name=h.horse_name,
+            horse_number=h.horse_number,
+            frame_number=h.frame_number,
+            popularity=h.popularity,
+            running_style=h.running_style,
+            last_finishing_position=h.last_finishing_position,
+            today_carry_weight=carry_by_id.get(h.horse_id),
+            past_runs=runs,
+            race_meta=meta,
+        )
+        horse_ratings.append(rating)
+
+    # 5) 本命判定 + 減点
+    judgment = determine_main_pick_v2(horse_ratings, meta, threshold=HONMEI_RATING_THRESHOLD)
+
+    # 6) ワイド候補(A2-A5、最大3頭)
+    wides = extract_wide_candidates_v2(horse_ratings, meta)
+
+    # 7) Step 5 R2 偶奇フィルタは v1 ヘルパを使う(HorseMarkData 経由)
+    wides = filter_by_frame_parity(wides, horses_v1)
+
+    # 8) 買い目生成(v1 ヘルパが HorseMarkData を期待するため horses_v1 を渡す)
+    betting = generate_betting_recommendations(
+        judgment.main_pick, judgment.sub_pick, wides, horses_v1
+    )
+
+    return RacePrediction(
+        race_id=meta.get("race_id", ""),
+        race_meta=meta,
+        horses=horses_v1,
+        judgment=judgment,
+        wide_candidates=wides,
+        betting=betting,
+        demerit_entries=judgment.demerit_entries,
+        logic_mode="rating",
+        horse_ratings=horse_ratings,
+    )
+
+
+def predict_race(
+    race_card_df: pd.DataFrame,
+    historical: HistoricalData | pd.DataFrame,
+    target_date: str | None = None,
+    *,
+    mode: str | None = None,
+) -> RacePrediction:
+    """LOGIC_MODE に従って v1 / v2 を dispatch する公開関数。"""
+    chosen = mode or LOGIC_MODE
+    if chosen == "rating":
+        return predict_race_v2(race_card_df, historical, target_date)
+    return predict_race_v1(race_card_df, historical, target_date)
 
 
 def predict_all_races_v1(
     race_card_df: pd.DataFrame,
     historical: HistoricalData | pd.DataFrame,
+    *,
+    mode: str | None = None,
 ) -> dict[str, RacePrediction]:
-    """出馬表全体を race_id 単位で v1.0 予想する。"""
+    """出馬表全体を race_id 単位で予想する(LOGIC_MODE / mode 引数で切替)。"""
     results: dict[str, RacePrediction] = {}
     for race_id, group in race_card_df.groupby("race_id", sort=False):
         target_date = str(group["race_date"].iloc[0])
-        results[str(race_id)] = predict_race_v1(group, historical, target_date)
+        results[str(race_id)] = predict_race(group, historical, target_date, mode=mode)
     return results
 
 

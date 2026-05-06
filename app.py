@@ -87,51 +87,104 @@ def _format_horse_runtime(horse) -> str:
     return f"{horse.running_style} / {pop_str}"
 
 
+def _is_rating_mode(pred: RacePrediction) -> bool:
+    return getattr(pred, "logic_mode", "onmark") == "rating"
+
+
+def _score_label(pred: RacePrediction, marks_or_rating: int) -> str:
+    """ロジックモードに応じた表記を返す。"""
+    if _is_rating_mode(pred):
+        return f"rate {marks_or_rating}"
+    return f"○{marks_or_rating}個"
+
+
+def _horse_score(pred: RacePrediction, horse_id: str) -> int:
+    """rating モードなら horse_ratings から、それ以外は horses.marks_count から。"""
+    if _is_rating_mode(pred):
+        h = next((x for x in pred.horse_ratings if x.horse_id == horse_id), None)
+        return h.total_rating if h else 0
+    h = next((x for x in pred.horses if x.horse_id == horse_id), None)
+    return h.marks_count if h else 0
+
+
 def _render_section_main_pick(pred: RacePrediction) -> None:
     """セクション 1: 本命・注目馬"""
     st.markdown("**🏆 本命・注目馬**")
     j = pred.judgment
+    rating_mode = _is_rating_mode(pred)
 
     # 本命 or 準本命
     if j.main_pick:
         axis = next((h for h in pred.horses if h.horse_id == j.main_pick), None)
         if axis:
+            score = _horse_score(pred, axis.horse_id)
             st.success(
                 f"◎本命: 馬番{axis.horse_number} **{axis.horse_name}** "
-                f"({_format_horse_runtime(axis)}) ○{axis.marks_count}個"
+                f"({_format_horse_runtime(axis)}) {_score_label(pred, score)}"
             )
     elif j.sub_pick:
         sub = next((h for h in pred.horses if h.horse_id == j.sub_pick), None)
         if sub:
+            score = _horse_score(pred, sub.horse_id)
+            note = "※rating ≥ 100 の本命候補なし" if rating_mode else "※○≥5 の本命候補なし"
             st.warning(
                 f"準◎: 馬番{sub.horse_number} **{sub.horse_name}** "
-                f"({_format_horse_runtime(sub)}) ○{sub.marks_count}個 "
-                f"※○≥5 の本命候補なし"
+                f"({_format_horse_runtime(sub)}) {_score_label(pred, score)} "
+                f"{note}"
             )
     else:
         st.info("該当馬なし(全頭減点で軸馬決定不能)")
 
     st.caption(f"判定: {j.reason}")
 
-    # ○3 以上の注目馬テーブル(本命除く)
+    # rating モードでは内訳を expander で見せる
+    if rating_mode and (j.main_pick or j.sub_pick):
+        axis_id = j.main_pick or j.sub_pick
+        rating_obj = next((r for r in pred.horse_ratings if r.horse_id == axis_id), None)
+        if rating_obj and rating_obj.matched:
+            with st.expander(
+                f"⚙ 軸馬の rating 内訳 (合計 {rating_obj.total_rating} 点)",
+                expanded=False,
+            ):
+                for hit in rating_obj.matched:
+                    st.write(f"- **{hit.rule_id}** (+{hit.rate}): {hit.reason}")
+
+    # 注目馬テーブル(本命除く、rating モード: rating 上位、onmark: ○数上位)
     axis_id = j.main_pick or j.sub_pick
-    notables = [
-        h for h in sorted(pred.horses, key=lambda x: -x.marks_count)
-        if h.horse_id != axis_id and h.marks_count >= 1
-    ][:6]
-    if notables:
-        rows = [
-            {
-                "○": h.marks_count,
-                "馬番": h.horse_number,
-                "馬名": h.horse_name,
-                "脚質": h.running_style,
-                "人気": h.popularity if h.popularity > 0 else "",
-            }
-            for h in notables
-        ]
-        st.markdown("注目馬(○ ≥ 1):")
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    if rating_mode:
+        sorted_notables = sorted(pred.horse_ratings, key=lambda x: -x.total_rating)
+        notables = [h for h in sorted_notables if h.horse_id != axis_id and h.total_rating >= 1][:6]
+        if notables:
+            rows = [
+                {
+                    "rate": h.total_rating,
+                    "馬番": h.horse_number,
+                    "馬名": h.horse_name,
+                    "脚質": h.running_style,
+                    "人気": h.popularity if h.popularity > 0 else "",
+                }
+                for h in notables
+            ]
+            st.markdown("注目馬(rate ≥ 1):")
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    else:
+        notables = [
+            h for h in sorted(pred.horses, key=lambda x: -x.marks_count)
+            if h.horse_id != axis_id and h.marks_count >= 1
+        ][:6]
+        if notables:
+            rows = [
+                {
+                    "○": h.marks_count,
+                    "馬番": h.horse_number,
+                    "馬名": h.horse_name,
+                    "脚質": h.running_style,
+                    "人気": h.popularity if h.popularity > 0 else "",
+                }
+                for h in notables
+            ]
+            st.markdown("注目馬(○ ≥ 1):")
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
 def _render_section_wide(pred: RacePrediction) -> None:
@@ -183,24 +236,49 @@ def _render_section_betting(pred: RacePrediction) -> None:
 
 
 def _render_section_all_marks(pred: RacePrediction) -> None:
-    """セクション 6: 全頭の○マーク詳細"""
-    with st.expander("全頭の○マーク詳細", expanded=False):
-        for h in sorted(pred.horses, key=lambda x: (-x.marks_count, x.horse_number)):
-            mark_label = ""
-            if h.horse_id == pred.judgment.main_pick:
-                mark_label = "◎ "
-            elif h.horse_id == pred.judgment.sub_pick:
-                mark_label = "準◎ "
-            head = (
-                f"{mark_label}馬番{h.horse_number} {h.horse_name} "
-                f"({_format_horse_runtime(h)}) ○{h.marks_count}個"
-            )
-            if h.matched_rules:
-                with st.expander(head, expanded=False):
-                    for r in h.matched_rules:
-                        st.write(f"- {r}")
-            else:
-                st.write(head + "  — 該当ルールなし")
+    """セクション 6: 全頭の rating / ○マーク詳細"""
+    rating_mode = _is_rating_mode(pred)
+    section_title = "全頭の rating 詳細" if rating_mode else "全頭の○マーク詳細"
+
+    with st.expander(section_title, expanded=False):
+        if rating_mode:
+            for r in sorted(pred.horse_ratings,
+                             key=lambda x: (-x.total_rating, x.horse_number)):
+                mark_label = ""
+                if r.horse_id == pred.judgment.main_pick:
+                    mark_label = "◎ "
+                elif r.horse_id == pred.judgment.sub_pick:
+                    mark_label = "準◎ "
+                pop_str = f"{r.popularity}人気" if r.popularity > 0 else "人気不明"
+                head = (
+                    f"{mark_label}馬番{r.horse_number} {r.horse_name} "
+                    f"({r.running_style} / {pop_str}) rate {r.total_rating}"
+                )
+                if r.matched:
+                    with st.expander(head, expanded=False):
+                        for hit in r.matched:
+                            st.write(f"- **{hit.rule_id}** (+{hit.rate}): {hit.reason}")
+                        if r.rule24_active:
+                            st.caption("📌 F2 救済発動(2,3走前で評価)")
+                else:
+                    st.write(head + "  — 該当ルールなし")
+        else:
+            for h in sorted(pred.horses, key=lambda x: (-x.marks_count, x.horse_number)):
+                mark_label = ""
+                if h.horse_id == pred.judgment.main_pick:
+                    mark_label = "◎ "
+                elif h.horse_id == pred.judgment.sub_pick:
+                    mark_label = "準◎ "
+                head = (
+                    f"{mark_label}馬番{h.horse_number} {h.horse_name} "
+                    f"({_format_horse_runtime(h)}) ○{h.marks_count}個"
+                )
+                if h.matched_rules:
+                    with st.expander(head, expanded=False):
+                        for r in h.matched_rules:
+                            st.write(f"- {r}")
+                else:
+                    st.write(head + "  — 該当ルールなし")
 
 
 def _expander_title(pred: RacePrediction) -> str:
@@ -218,11 +296,13 @@ def _expander_title(pred: RacePrediction) -> str:
     if j.main_pick:
         h = next((x for x in pred.horses if x.horse_id == j.main_pick), None)
         if h:
-            base += f" — ◎{h.horse_name} ○{h.marks_count}"
+            score = _horse_score(pred, h.horse_id)
+            base += f" — ◎{h.horse_name} {_score_label(pred, score)}"
     elif j.sub_pick:
         h = next((x for x in pred.horses if x.horse_id == j.sub_pick), None)
         if h:
-            base += f" — 準◎{h.horse_name} ○{h.marks_count}"
+            score = _horse_score(pred, h.horse_id)
+            base += f" — 準◎{h.horse_name} {_score_label(pred, score)}"
     return base
 
 
@@ -246,7 +326,18 @@ def render_predictions_section(
         f"予想完了({len(display_predictions)} / {len(all_predictions)} "
         f"レース表示中{course_suffix})"
     )
-    st.caption("ロジック: **本ロジック v1.0**(○マーク収集 → 本命判定 → ワイド抽出 → 買い目)")
+    # ロジックモードを先頭レースから判定して表示
+    sample_pred = next(iter(display_predictions.values()), None)
+    if sample_pred and getattr(sample_pred, "logic_mode", "onmark") == "rating":
+        st.caption(
+            "ロジック: **本ロジック v1.1 (rating-based)** — C/D/E/F1/F2/F3 評価で "
+            "rating ≥ 100 を ◎本命に確定。"
+        )
+    else:
+        st.caption(
+            "ロジック: **本ロジック v1.0** "
+            "(○マーク収集 → 本命判定 → ワイド抽出 → 買い目)"
+        )
 
     # ----- レース一覧サマリ統計 -----
     n_honmei = sum(1 for p in display_predictions.values() if p.judgment.main_pick)
@@ -368,7 +459,7 @@ def render_predictions_section(
 # =====================================================================
 # 過去データの読み込み
 # =====================================================================
-HISTORICAL_DATA_SCHEMA_VERSION = "v3-corner-positions"
+HISTORICAL_DATA_SCHEMA_VERSION = "v4-rating-engine"
 
 
 @st.cache_data(show_spinner="過去データを読み込み中…")
