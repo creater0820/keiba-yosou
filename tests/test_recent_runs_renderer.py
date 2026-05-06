@@ -23,8 +23,11 @@ from utils.onmark_rules import matches_any_onmark_rule  # noqa: E402
 from utils.recent_runs_renderer import (  # noqa: E402
     _build_run_cell,
     _format_course_with_track,
+    _format_horse_label,
     _format_pass_order,
+    _is_blank_jockey,
     _is_exact_distance_match,
+    _is_jockey_changed,
 )
 
 
@@ -275,6 +278,108 @@ def test_case5_null_last3f_no_exception_no_green():
     cell = _build_run_cell(run, target_surface="芝", target_distance=1400)
     assert "──" in cell, "上3F は ── で表示されるはず"
     assert not _has_pass_class(cell), "null だから緑はつかない"
+
+
+# ==================================================================
+# T1: ジョッキー変更検出
+# ==================================================================
+def test_jockey_changed_when_different():
+    assert _is_jockey_changed("武豊", "ルメール") is True
+
+
+def test_jockey_changed_false_when_same():
+    assert _is_jockey_changed("武豊", "武豊") is False
+
+
+def test_jockey_changed_strips_whitespace():
+    """前後空白だけの違いは「同じ」と判定するべき。"""
+    assert _is_jockey_changed(" 武豊 ", "武豊") is False
+
+
+def test_jockey_changed_skipped_when_either_blank():
+    """どちらかが欠損なら判定スキップ(False を返す)。"""
+    assert _is_jockey_changed(None, "武豊") is False
+    assert _is_jockey_changed("武豊", None) is False
+    assert _is_jockey_changed("", "武豊") is False
+    assert _is_jockey_changed("武豊", "") is False
+
+
+# ==================================================================
+# T2: 馬名ラベルへのジョッキー追加(末尾「(jockey)」+ 赤字フラグ)
+# ==================================================================
+def test_horse_label_appends_today_jockey():
+    label = _format_horse_label("◎", 7, "クロワデュノール", today_jockey="北村友一")
+    assert "クロワデュノール" in label
+    assert "北村友一" in label
+    assert 'class="jockey-today"' in label
+    assert "jockey-changed" not in label, "同じジョッキーなら赤字クラス無し"
+
+
+def test_horse_label_appends_jockey_changed_class():
+    label = _format_horse_label(
+        "◎", 7, "クロワデュノール",
+        today_jockey="武豊", jockey_changed=True,
+    )
+    assert 'jockey-changed' in label
+    assert "武豊" in label
+
+
+def test_horse_label_unknown_when_blank_jockey():
+    label = _format_horse_label("◎", 7, "X", today_jockey="")
+    # 二重括弧 「((不明))」 にならず 「(不明)」 になる
+    assert "(不明)" in label
+    assert "((" not in label, f"二重括弧バグ: {label!r}"
+
+
+def test_horse_label_no_jockey_section_when_param_omitted():
+    """today_jockey=None で渡した場合は jockey 部分を一切出さない。"""
+    label = _format_horse_label("◎", 7, "X", today_jockey=None)
+    assert "jockey-today" not in label
+
+
+# ==================================================================
+# T3: 過去走セルにジョッキー 4 行目が含まれる
+# ==================================================================
+def test_run_cell_includes_jockey_row():
+    run = _run(
+        surface="芝", distance=1600, going="良",
+        last_3f=34.0, racecourse="東京", corners=(8, 6, 4, 2),
+    )
+    run["jockey"] = "ルメール"
+    cell = _build_run_cell(run, target_surface="芝", target_distance=1600)
+    assert '<div class="jockey">ルメール</div>' in cell
+
+
+# ==================================================================
+# T4: 過去走で jockey 欠損 → 「(不明)」表示で例外を出さない
+# ==================================================================
+def test_run_cell_jockey_missing_shows_unknown():
+    run_none = _run(
+        surface="芝", distance=1600, going="良",
+        last_3f=34.0, racecourse="東京", corners=(8, 6, 4, 2),
+    )
+    run_none["jockey"] = None
+    cell = _build_run_cell(run_none, target_surface="芝", target_distance=1600)
+    assert '<div class="jockey">(不明)</div>' in cell
+
+    run_blank = dict(run_none, jockey="")
+    cell2 = _build_run_cell(run_blank, target_surface="芝", target_distance=1600)
+    assert '<div class="jockey">(不明)</div>' in cell2
+
+
+# ==================================================================
+# T5: past_runs[0] = None のとき jockey-changed 判定スキップ
+# ==================================================================
+def test_jockey_changed_skipped_when_no_prev_run():
+    """前走 dict が None なら jockey の比較は走らせない(初出走馬対応)。"""
+    # _is_jockey_changed への入力で「前走 jockey」が None なら False
+    assert _is_jockey_changed("武豊", None) is False
+    # _is_blank_jockey でも検証
+    assert _is_blank_jockey(None) is True
+    assert _is_blank_jockey(float("nan")) is True
+    assert _is_blank_jockey("") is True
+    assert _is_blank_jockey("(不明)") is True
+    assert _is_blank_jockey("武豊") is False
 
 
 # ==================================================================
