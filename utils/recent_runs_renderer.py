@@ -4,6 +4,12 @@
 C1 では「縦3行(着順 / コース距離 / 上がり3F)+ 横5列(5走前→前走)」の
 基本テーブル構造だけを実装。C2 で着順の色分け・サーフェスマッチ ★、
 C3 で上がり3F の強調表示を追加する。
+
+条件付きフォーマット(本ファイル単独で完結):
+- 距離が当日と完全一致(±0m)した過去走 → 行頭(セル先頭の着順行)に ★ を付与
+- 上がり3F が AGARI_THRESHOLD 以下の過去走 → 値+「秒」を緑文字で強調
+  閾値は CLAUDE.md にレース条件別の細分があるが、表示用の汎用閾値として
+  33.5 秒(spec の R9 阪神中山特例 / 33秒台前半「好末脚」基準)を採用。
 """
 
 from __future__ import annotations
@@ -18,81 +24,93 @@ from utils.race_history import get_recent_runs_for_race
 
 
 # =====================================================================
-# CSS (テーブル構造のみ。色・★・3F強調は後続コミットで追加)
+# 表示用の閾値・色の定数(マジックナンバー禁止)
 # =====================================================================
-_MATRIX_CSS = """
+# 上3F 緑表示の閾値(秒)。これ「以下」なら緑強調。
+AGARI_THRESHOLD: float = 33.5
+# 緑文字の色値(Tailwind green-500 と同値、CSS 変数化のソース)
+LAST3F_PASS_COLOR: str = "#22c55e"
+# 距離完全一致を示すマーク文字(U+2605)
+DISTANCE_MATCH_STAR: str = "★"
+
+
+# =====================================================================
+# CSS (テーブル構造 + 距離一致★ + 上3F緑強調)
+# =====================================================================
+_MATRIX_CSS = f"""
 <style>
-.recent-runs-matrix {
+.recent-runs-matrix {{
     border-collapse: collapse;
     width: 100%;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 12px;
     margin-top: 8px;
-}
-.recent-runs-matrix th {
+}}
+.recent-runs-matrix th {{
     background: rgba(255,255,255,0.05);
     padding: 6px 8px;
     text-align: center;
     font-weight: normal;
     border-bottom: 1px solid rgba(255,255,255,0.1);
     color: rgba(255,255,255,0.85);
-}
-.recent-runs-matrix td {
+}}
+.recent-runs-matrix td {{
     padding: 0;
     text-align: center;
     border: 1px solid rgba(255,255,255,0.1);
     vertical-align: middle;
-}
-.recent-runs-matrix .horse-label {
+}}
+.recent-runs-matrix .horse-label {{
     text-align: left !important;
     white-space: nowrap;
     padding: 8px 12px !important;
     font-weight: 500;
     color: #fff;
     min-width: 180px;
-}
-.recent-runs-matrix .run-cell {
+}}
+.recent-runs-matrix .run-cell {{
     min-width: 90px;
-}
-.recent-runs-matrix .run-cell .position {
+}}
+.recent-runs-matrix .run-cell .position {{
     padding: 4px 0;
     font-weight: bold;
-}
-.recent-runs-matrix .run-cell .course {
+}}
+.recent-runs-matrix .run-cell .course {{
     padding: 3px 0;
     font-size: 11px;
     color: rgba(255,255,255,0.85);
-}
-.recent-runs-matrix .run-cell .last3f {
+}}
+.recent-runs-matrix .run-cell .last3f {{
     padding: 3px 0;
     font-size: 11px;
     color: rgba(255,255,255,0.7);
-}
+}}
 /* 着順クラス(色塗り廃止 — 構造保持のためクラスは残し、見た目は背景・文字色とも既定) */
 .recent-runs-matrix .pos-1-3,
 .recent-runs-matrix .pos-4-6,
 .recent-runs-matrix .pos-7-12,
 .recent-runs-matrix .pos-13plus,
-.recent-runs-matrix .pos-none {
+.recent-runs-matrix .pos-none {{
     background: transparent;
     color: inherit;
-}
-/* サーフェス一致マーカー(色なし): 同芝/ダ → ★、同芝/ダ + 距離±200m → ★★ */
-.recent-runs-matrix .surface-match::after          { content: " ★";  color: inherit; }
-.recent-runs-matrix .surface-distance-match::after { content: " ★★"; color: inherit; }
-/* 上がり3F の評価強調も色塗りなしで素のテキストに */
-.recent-runs-matrix .last3f-fast,
-.recent-runs-matrix .last3f-slow {
-    color: inherit;
-    font-weight: inherit;
-}
+}}
+/* 距離完全一致マーカー: 着順行の先頭に「★ 」を出す(行頭=セル上端) */
+.recent-runs-matrix .distance-match-star {{
+    color: #ffd54a;
+    margin-right: 2px;
+}}
+/* 上がり3F が AGARI_THRESHOLD 以下 → 緑文字 + 太字。秒単位も同色に含める。 */
+.recent-runs-matrix .last3f-pass {{
+    color: {LAST3F_PASS_COLOR};
+    font-weight: bold;
+}}
 /* 凡例(色チップなし、テキストのみ) */
-.recent-runs-matrix-legend {
+.recent-runs-matrix-legend {{
     font-size: 11px;
     margin-top: 6px;
     color: rgba(255,255,255,0.7);
-}
-.recent-runs-matrix-legend .legend-tag {
+}}
+.recent-runs-matrix-legend .legend-tag {{
     display: inline-block;
     padding: 0 4px;
     margin-right: 4px;
@@ -101,7 +119,7 @@ _MATRIX_CSS = """
     color: inherit;
     border: 1px solid rgba(255,255,255,0.2);
     border-radius: 2px;
-}
+}}
 </style>
 """
 
@@ -140,27 +158,27 @@ def _position_class(pos_value) -> str:
     return "pos-13plus"
 
 
-def _course_match_class(
-    run_surface: str, run_distance: int, target_surface: str, target_distance: int
-) -> str:
+def _is_exact_distance_match(run_distance: int, target_distance: int) -> bool:
     """
-    今回レースとの「サーフェス一致」「距離一致」を表す CSS クラス。
-    - 同芝・同ダート + 距離±200m → "surface-distance-match" (★★)
-    - 同芝・同ダート              → "surface-match"          (★)
-    - 一致しない                  → ""                       (マーク無し)
+    過去走の距離が当日レース距離と完全一致(±0m)するか。
+    どちらかが 0 / 不明なら False(欠損行はマーク対象外)。
     """
-    if not run_surface or not target_surface or run_surface != target_surface:
-        return ""
     if not run_distance or not target_distance:
-        # 距離不明なら一致のみ判定
-        return "surface-match"
-    if abs(run_distance - target_distance) <= 200:
-        return "surface-distance-match"
-    return "surface-match"
+        return False
+    return run_distance == target_distance
 
 
 def _build_run_cell(run: dict | None, target_surface: str, target_distance: int) -> str:
-    """1走分のセル HTML を組み立てる(縦に 着順 / コース距離 / 上がり3F の 3 行)。"""
+    """
+    1走分のセル HTML を組み立てる(縦に 着順 / コース距離 / 上がり3F の 3 行)。
+
+    条件付きフォーマット:
+    - 距離が当日レースと完全一致 → 着順行の冒頭に ★ を出す(行頭マーカー)
+    - 上がり3F <= AGARI_THRESHOLD → 値+「秒」を緑文字で強調
+
+    target_surface は将来の拡張(同サーフェス絞り込み等)のためにシグネチャに残すが、
+    現仕様では距離のみで判定する(ユーザー指定: ±0m の完全一致のみ)。
+    """
     if run is None:
         return (
             '<td class="run-cell">'
@@ -189,27 +207,29 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
     except (ValueError, TypeError):
         distance = 0
     course_str = f"{surface}{distance}" if distance else surface or "──"
-    course_cls = _course_match_class(surface, distance, target_surface, target_distance)
-    course_class_attr = f"course {course_cls}".rstrip()
 
-    # ----- 上がり3F -----
+    # ----- 距離完全一致 → ★ を行頭(着順行の冒頭)に -----
+    distance_match = _is_exact_distance_match(distance, target_distance)
+    star_html = (
+        f'<span class="distance-match-star">{DISTANCE_MATCH_STAR}</span> '
+        if distance_match else ""
+    )
+
+    # ----- 上がり3F + 緑強調 -----
     last_3f = run.get("last_3f")
-    last3f_cls = ""
     if last_3f is None or pd.isna(last_3f):
         last3f_str = "──"
+        last3f_cls = ""
     else:
         f = float(last_3f)
-        last3f_str = f"{f:.1f}"
-        if f < 33.5:
-            last3f_cls = "last3f-fast"   # 33秒台前半 → 好末脚(太字緑)
-        elif f >= 35.0:
-            last3f_cls = "last3f-slow"   # 35秒以上  → 鈍い(淡灰)
+        last3f_str = f"{f:.1f}秒"
+        last3f_cls = "last3f-pass" if f <= AGARI_THRESHOLD else ""
     last3f_class_attr = f"last3f {last3f_cls}".rstrip()
 
     return (
         '<td class="run-cell">'
-        f'<div class="position {pos_cls}">{html.escape(pos_str)}</div>'
-        f'<div class="{course_class_attr}">{html.escape(course_str)}</div>'
+        f'<div class="position {pos_cls}">{star_html}{html.escape(pos_str)}</div>'
+        f'<div class="course">{html.escape(course_str)}</div>'
         f'<div class="{last3f_class_attr}">{html.escape(last3f_str)}</div>'
         "</td>"
     )
@@ -282,7 +302,7 @@ def render_recent_runs_matrix(
 
     parts.append("</tbody></table>")
 
-    # ----- 凡例(色塗り廃止、★ も既定色) -----
+    # ----- 凡例(距離一致★ + 上3F緑強調) -----
     parts.append(
         '<div class="recent-runs-matrix-legend">'
         "凡例: "
@@ -291,8 +311,10 @@ def render_recent_runs_matrix(
         '<span class="legend-tag">7-12着</span>'
         '<span class="legend-tag">13着以下</span>'
         '<span class="legend-tag">出走なし</span>'
-        " | ★ = 今回と同じ芝/ダ"
-        " / ★★ = 同 芝/ダ + 距離±200m"
+        f" | <span class=\"distance-match-star\">{DISTANCE_MATCH_STAR}</span>"
+        f" = 当日距離({target_distance}m)と完全一致"
+        f" | <span class=\"last3f-pass\">上3F ≤ {AGARI_THRESHOLD:.1f}秒</span>"
+        " = 好末脚"
         "</div>"
     )
 
