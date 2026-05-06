@@ -121,7 +121,41 @@ def test_case4_turf3200_good_33_0_fires_r15():
 
 
 # ==================================================================
-# Case 5: last_3f が None → 例外なし、通常表示、緑も付かない
+# Case 5.5: CSS specificity リグレッション(本番事故再発防止)
+#
+# .recent-runs-matrix .run-cell .last3f       (0,3,0) color: rgba(255,255,255,0.7)
+# が定義されているので、緑側もそれ以上の specificity が必要。
+#
+# 過去事故: `.recent-runs-matrix .last3f-pass` (0,2,0) で書かれていたため、
+# クラスは付くのに色が負けて本番で全く緑にならなかった(commit 489028c で出荷
+# された不具合)。再発防止のため CSS 文字列を直接 assert する。
+# ==================================================================
+def test_css_specificity_is_3_levels_for_pass_class():
+    from utils.recent_runs_renderer import _MATRIX_CSS
+
+    good = ".recent-runs-matrix .run-cell .last3f-pass"
+    # 過去のバグった書き方(これだけが残っていてはダメ — .last3f に負ける)
+    bad_only = ".recent-runs-matrix .last3f-pass {"
+
+    assert good in _MATRIX_CSS, (
+        "緑強調セレクタは .run-cell を挟んだ 3 階層 (specificity 0,3,0) で "
+        "書かれている必要がある(.last3f の color: rgba(255,255,255,0.7) "
+        "に勝つため)"
+    )
+    # ↑ "good" を含み、かつ ".recent-runs-matrix .last3f-pass {" 単独の
+    # ルールがあってはならない(あるとしたら旧バグった書き方の残骸)
+    # `.recent-runs-matrix .run-cell .last3f-pass` は部分文字列として
+    # `.recent-runs-matrix .last3f-pass` を含まないので素朴な `in` 比較で OK
+    # ではないことに注意 → 検査は { まで含めた "bad_only" と一致しないこと
+    bare_pattern_count = _MATRIX_CSS.count(bad_only)
+    assert bare_pattern_count == 0, (
+        f"古い `.recent-runs-matrix .last3f-pass {{` 単独セレクタが "
+        f"残っている({bare_pattern_count} 箇所)— 必ず .run-cell を挟む形に揃える"
+    )
+
+
+# ==================================================================
+# Case 6: last_3f が None → 例外なし、通常表示、緑も付かない
 # ==================================================================
 def test_case5_null_last3f_no_exception_no_green():
     run = _run(
