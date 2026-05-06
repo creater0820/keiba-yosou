@@ -566,6 +566,65 @@ with st.sidebar:
     else:
         selected_course = "全場"
 
+    # ====================================================================
+    # 🌟 推奨馬 (rating ≥ 100) ─ 競馬場フィルタの直下に配置
+    # ====================================================================
+    # 予想実行済みかつ rating モードの結果がセッションにある場合のみ表示。
+    # 競馬場フィルタの選択値で絞り込み連動する。
+    _session_preds = st.session_state.get("all_predictions")
+    if _session_preds and race_card_df is not None:
+        st.divider()
+        st.subheader("🌟 推奨馬 (rating ≥ 100)")
+        # 馬番→ jockey 引きマップ(race_card_df から)
+        _jockey_by_hid: dict[str, str] = {}
+        if "jockey" in race_card_df.columns:
+            for _, _row in race_card_df.iterrows():
+                _jockey_by_hid[str(_row["horse_id"])] = (
+                    str(_row.get("jockey", "") or "").strip()
+                )
+
+        recs: list[dict] = []
+        for _rid, _pred in _session_preds.items():
+            ratings = getattr(_pred, "horse_ratings", None) or []
+            if not ratings:
+                continue  # onmark モード等
+            _meta = _pred.race_meta
+            _course = _meta.get("racecourse", "")
+            if selected_course != "全場" and _course != selected_course:
+                continue
+            for _h in ratings:
+                if _h.total_rating < 100:
+                    continue
+                _jockey = _jockey_by_hid.get(_h.horse_id, "") or "(不明)"
+                if not _jockey.strip():
+                    _jockey = "(不明)"
+                recs.append({
+                    "course": _course,
+                    "race_number": int(_meta.get("race_number") or 0),
+                    "post_time": _meta.get("post_time", ""),
+                    "horse_number": _h.horse_number,
+                    "horse_name": _h.horse_name,
+                    "rating": _h.total_rating,
+                    "jockey": _jockey,
+                })
+
+        # 並び順: post_time 昇順 → R番昇順
+        recs.sort(key=lambda r: (r["post_time"] or "99:99", r["race_number"]))
+
+        if recs:
+            for r in recs:
+                # tooltip に rating 値を載せる(コンパクトなまま親切表示)
+                _line = (
+                    f"<span title='rating {r['rating']}'>"
+                    f"{r['course']}{r['race_number']}R "
+                    f"<b>{r['horse_number']} {r['horse_name']}</b>"
+                    f"({r['jockey']})"
+                    f"</span>"
+                )
+                st.markdown(_line, unsafe_allow_html=True)
+        else:
+            st.caption("該当馬なし(rating 100 以上の馬がいません)")
+
     st.divider()
     st.subheader("📊 過去データ")
     SOURCE_LABEL = {"parquet": "本番(Parquet)", "csv_sample": "サンプル(CSV)"}
@@ -629,6 +688,11 @@ if race_card_df is not None and historical is not None:
         all_predictions = predict_all_races_cached(file_hash, race_card_df, historical)
         st.session_state["all_predictions"] = all_predictions
         st.session_state["predictions_for_file"] = file_hash
+        # サイドバーは script の先頭付近で描画されるので、その時点で
+        # session_state["all_predictions"] を読めるよう即座に rerun する。
+        # (予想実行ボタンはサイドバーより後ろにあるため、この rerun を挟まないと
+        # 「🌟 推奨馬」セクションが 1 回分の click 直後には見えない)
+        st.rerun()
 
 
 # =====================================================================
