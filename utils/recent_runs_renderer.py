@@ -100,8 +100,13 @@ _MATRIX_CSS = f"""
     margin-right: 2px;
 }}
 /* ○ルール(R9〜R22)が 1 本でも該当 → 緑文字+太字。秒単位も同色に含める。
-   ホバー時に title 属性(該当ルール ID)が tooltip として出る。 */
-.recent-runs-matrix .last3f-pass {{
+   ホバー時に title 属性(該当ルール ID)が tooltip として出る。
+
+   ⚠ specificity 注意: `.recent-runs-matrix .run-cell .last3f` (0,3,0) が
+   color: rgba(255,255,255,0.7) を持っているので、こちらも `.run-cell` を
+   挟んで同じ (0,3,0) 以上に揃える必要がある。さもないとクラスは付くのに
+   色だけ負ける(過去の本番事故あり)。 */
+.recent-runs-matrix .run-cell .last3f-pass {{
     color: {LAST3F_PASS_COLOR};
     font-weight: bold;
     cursor: help;
