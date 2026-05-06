@@ -20,7 +20,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from utils.onmark_rules import matches_any_onmark_rule  # noqa: E402
-from utils.recent_runs_renderer import _build_run_cell  # noqa: E402
+from utils.recent_runs_renderer import (  # noqa: E402
+    _build_run_cell,
+    _format_course_with_track,
+    _format_pass_order,
+    _is_exact_distance_match,
+)
 
 
 # ==================================================================
@@ -151,6 +156,110 @@ def test_css_specificity_is_3_levels_for_pass_class():
     assert bare_pattern_count == 0, (
         f"古い `.recent-runs-matrix .last3f-pass {{` 単独セレクタが "
         f"残っている({bare_pattern_count} 箇所)— 必ず .run-cell を挟む形に揃える"
+    )
+
+
+# ==================================================================
+# 場名フォーマッタ _format_course_with_track
+# ==================================================================
+def test_course_with_track_full_data():
+    s = _format_course_with_track("芝", 2400, "東京")
+    assert s == "芝2400（東京）", f"got {s!r}"
+    # 全角括弧 (U+FF08 / U+FF09) であること、半角 (U+0028 / U+0029) は使わない
+    assert "（" in s and "）" in s, f"全角括弧が見つからない: {s!r}"
+    assert "(" not in s and ")" not in s, f"半角括弧が混入: {s!r}"
+
+
+def test_course_with_track_dirt():
+    assert _format_course_with_track("ダ", 1800, "阪神") == "ダ1800（阪神）"
+
+
+def test_course_with_track_no_racecourse():
+    """場名が空文字なら括弧自体を出さない。"""
+    assert _format_course_with_track("芝", 1600, "") == "芝1600"
+
+
+def test_course_with_track_all_missing():
+    """サーフェス・距離が両方欠損なら ── を返す。"""
+    assert _format_course_with_track("", 0, "東京") == "──"
+
+
+# ==================================================================
+# 通過順フォーマッタ _format_pass_order
+# ==================================================================
+def test_pass_order_all_4_corners():
+    assert _format_pass_order(
+        {"corner_1": 2, "corner_2": 1, "corner_3": 5, "corner_4": 6}
+    ) == "2-1-5-6"
+
+
+def test_pass_order_short_distance_only_3rd_4th():
+    """短距離レースで corner_1,2 が無い場合、有効分のみ詰める。"""
+    assert _format_pass_order(
+        {"corner_1": None, "corner_2": None, "corner_3": 5, "corner_4": 6}
+    ) == "5-6"
+
+
+def test_pass_order_all_zero_returns_empty():
+    """全部 0(障害競走等で記録無し)は空文字。"""
+    assert _format_pass_order(
+        {"corner_1": 0, "corner_2": 0, "corner_3": 0, "corner_4": 0}
+    ) == ""
+
+
+def test_pass_order_with_nan_skipped():
+    """NaN はスキップして詰める。"""
+    assert _format_pass_order(
+        {"corner_1": float("nan"), "corner_2": 3, "corner_3": 2, "corner_4": 1}
+    ) == "3-2-1"
+
+
+def test_pass_order_empty_dict():
+    """corner キーすら無ければ空文字を返す(例外なし)。"""
+    assert _format_pass_order({}) == ""
+
+
+# ==================================================================
+# ★ サーフェス + 距離 完全一致(芝1200 と ダ1200 を区別する)
+# ==================================================================
+def test_star_requires_both_distance_and_surface_match():
+    # 同サーフェス + 同距離 → True
+    assert _is_exact_distance_match(1200, "芝", 1200, "芝") is True
+    # サーフェス違い → False(芝1200 ≠ ダ1200)
+    assert _is_exact_distance_match(1200, "ダ", 1200, "芝") is False
+    # 距離違い → False
+    assert _is_exact_distance_match(1400, "芝", 1200, "芝") is False
+    # サーフェス欠損 → False
+    assert _is_exact_distance_match(1200, "", 1200, "芝") is False
+
+
+# ==================================================================
+# 統合: _build_run_cell が場名・通過順・★ を含む期待形を出す
+# ==================================================================
+def test_build_run_cell_renders_track_and_pass_order():
+    run = _run(
+        surface="ダ", distance=1800, going="良", last_3f=38.0,
+        racecourse="阪神", finishing_position=6,
+        corners=(2, 1, 5, 6),
+    )
+    html_out = _build_run_cell(run, target_surface="ダ", target_distance=1800)
+    # 場名併記(全角括弧)
+    assert "ダ1800（阪神）" in html_out
+    # 通過順併記
+    assert '<span class="pass-order">2-1-5-6</span>' in html_out
+    # ★ サーフェス+距離一致で行頭マーカー
+    assert 'distance-match-star' in html_out
+
+
+def test_build_run_cell_omits_pass_order_when_no_corner_data():
+    """通過順データが無い走では <span class="pass-order"> 自体を出さない。"""
+    run = _run(
+        surface="芝", distance=1600, going="良", last_3f=34.5,
+        racecourse="東京", corners=(),  # コーナー全欠損
+    )
+    html_out = _build_run_cell(run, target_surface="芝", target_distance=1600)
+    assert 'pass-order' not in html_out, (
+        "コーナー全欠損では pass-order span 自体を出さない(──ではなく非表示)"
     )
 
 

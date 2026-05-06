@@ -69,11 +69,18 @@ _MATRIX_CSS = f"""
     min-width: 180px;
 }}
 .recent-runs-matrix .run-cell {{
-    min-width: 90px;
+    min-width: 110px;
 }}
 .recent-runs-matrix .run-cell .position {{
     padding: 4px 0;
     font-weight: bold;
+}}
+/* 通過順(着順の右に併記)。本文より一段階薄くしてノイズを抑える。 */
+.recent-runs-matrix .run-cell .pass-order {{
+    margin-left: 4px;
+    font-size: 10px;
+    font-weight: normal;
+    color: rgba(255,255,255,0.65);
 }}
 .recent-runs-matrix .run-cell .course {{
     padding: 3px 0;
@@ -165,14 +172,70 @@ def _position_class(pos_value) -> str:
     return "pos-13plus"
 
 
-def _is_exact_distance_match(run_distance: int, target_distance: int) -> bool:
+def _is_exact_distance_match(
+    run_distance: int,
+    run_surface: str,
+    target_distance: int,
+    target_surface: str,
+) -> bool:
     """
-    過去走の距離が当日レース距離と完全一致(±0m)するか。
-    どちらかが 0 / 不明なら False(欠損行はマーク対象外)。
+    過去走が当日レースと「サーフェス(芝/ダ) + 距離」で完全一致するか。
+
+    旧仕様は距離のみだったが、芝1200m と ダ1200m を同列に扱うのは混乱を生む
+    ため、サーフェス一致も AND 条件で要求する。どちらかが空 / 0 / 不明なら
+    False(欠損は照合対象外)。
     """
     if not run_distance or not target_distance:
         return False
-    return run_distance == target_distance
+    if not run_surface or not target_surface:
+        return False
+    return (run_distance == target_distance) and (run_surface == target_surface)
+
+
+def _format_course_with_track(surface: str, distance: int, racecourse: str) -> str:
+    """
+    コース表記を「サーフェス + 距離 + (場名)」形式で組み立てる。
+
+    括弧は spec 通り全角(U+FF08 / U+FF09)を使う。
+
+    - "ダ", 1800, "阪神" → "ダ1800(阪神)"
+    - "芝", 1600, ""     → "芝1600"            (場名欠損)
+    - "",   0,    "東京" → "──"                (距離 + サーフェス両方欠損)
+    """
+    base = f"{surface}{distance}" if distance else (surface or "──")
+    if base == "──":
+        return base
+    if racecourse:
+        return f"{base}（{racecourse}）"
+    return base
+
+
+def _format_pass_order(run: dict) -> str:
+    """
+    通過順を "X-X-X-X" 形式の文字列に整形する。
+
+    corner_1〜corner_4 の順で並べ、None / NaN / 0以下 はスキップして詰める
+    (短距離レースは 3 コーナー以降しか記録がない、障害レースで全 0 等)。
+    1 つも有効な値が無ければ空文字を返す(呼び出し側で表示自体を抑制)。
+    """
+    out: list[str] = []
+    for k in ("corner_1", "corner_2", "corner_3", "corner_4"):
+        v = run.get(k)
+        if v is None:
+            continue
+        try:
+            if pd.isna(v):
+                continue
+        except (TypeError, ValueError):
+            pass
+        try:
+            iv = int(v)
+        except (ValueError, TypeError):
+            continue
+        if iv < 1:
+            continue
+        out.append(str(iv))
+    return "-".join(out)
 
 
 def _build_run_cell(run: dict | None, target_surface: str, target_distance: int) -> str:
@@ -180,12 +243,11 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
     1走分のセル HTML を組み立てる(縦に 着順 / コース距離 / 上がり3F の 3 行)。
 
     条件付きフォーマット:
-    - 距離が当日レースと完全一致 → 着順行の冒頭に ★ を出す(行頭マーカー)
+    - サーフェス + 距離 が当日レースと完全一致 → 着順行の冒頭に ★(行頭マーカー)
     - ○ルール (R9〜R22) のいずれかが発火 → 上3F 値を緑文字で強調 + tooltip に
       該当ルール ID を表示
-
-    target_surface は将来の拡張(同サーフェス絞り込み等)のためにシグネチャに残すが、
-    距離一致 ★ では距離のみで判定する(ユーザー指定: ±0m の完全一致のみ)。
+    - 通過順位(corner_1..4)が有効 → 着順の右にハイフン区切りで併記
+    - 開催場名 → コース行の末尾に「(○○)」で併記
     """
     if run is None:
         return (
@@ -207,17 +269,27 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
             pos_str = "──"
     pos_cls = _position_class(pos)
 
-    # ----- コース・距離 -----
+    # ----- 通過順位(着順の右に X-X-X[-X] 形式で表示) -----
+    pass_order_str = _format_pass_order(run)
+    pass_order_html = (
+        f'<span class="pass-order">{html.escape(pass_order_str)}</span>'
+        if pass_order_str else ""
+    )
+
+    # ----- コース・距離 + 場名 -----
     surface = str(run.get("surface", "") or "").strip()
     raw_distance = run.get("distance")
     try:
         distance = int(raw_distance) if pd.notna(raw_distance) else 0
     except (ValueError, TypeError):
         distance = 0
-    course_str = f"{surface}{distance}" if distance else surface or "──"
+    racecourse = str(run.get("racecourse", "") or "").strip()
+    course_str = _format_course_with_track(surface, distance, racecourse)
 
-    # ----- 距離完全一致 → ★ を行頭(着順行の冒頭)に -----
-    distance_match = _is_exact_distance_match(distance, target_distance)
+    # ----- ★ サーフェス+距離 完全一致 → 行頭マーカー -----
+    distance_match = _is_exact_distance_match(
+        distance, surface, target_distance, target_surface,
+    )
     star_html = (
         f'<span class="distance-match-star">{DISTANCE_MATCH_STAR}</span> '
         if distance_match else ""
@@ -245,7 +317,9 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
 
     return (
         '<td class="run-cell">'
-        f'<div class="position {pos_cls}">{star_html}{html.escape(pos_str)}</div>'
+        f'<div class="position {pos_cls}">'
+            f'{star_html}{html.escape(pos_str)}{pass_order_html}'
+        '</div>'
         f'<div class="course">{html.escape(course_str)}</div>'
         f'<div class="{last3f_class_attr}"{last3f_title_attr}>{html.escape(last3f_str)}</div>'
         "</td>"
