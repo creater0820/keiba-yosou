@@ -39,6 +39,16 @@ from utils.logic_spec import (
     LogicCategory,
     LogicRule,
 )
+from utils.rating_rules import (
+    ALL_RATING_RULES,
+    HONMEI_RATING_THRESHOLD,
+    RATING_RULES_A,
+    RATING_RULES_B,
+    RATING_RULES_C,
+    RATING_RULES_D,
+    RATING_RULES_E,
+    RATING_RULES_F,
+)
 
 
 # =====================================================================
@@ -71,23 +81,30 @@ def _load_historical_for_page() -> HistoricalData:
 
 
 @st.cache_data(show_spinner="テストデータで予想計算中…")
-def _predict_test_data() -> dict[str, RacePrediction]:
-    """テストデータの morning race card を v1.0 ロジックで予想する。"""
+def _predict_test_data(mode: str) -> dict[str, RacePrediction]:
+    """テストデータの morning race card を指定モードで予想する。"""
     rc = _load_test_race_card()
     hist = _load_historical_for_page()
-    return predict_all_races_v1(rc, hist)
+    return predict_all_races_v1(rc, hist, mode=mode)
 
 
-def _get_predictions() -> tuple[dict[str, RacePrediction], str]:
-    """予想結果と「データ出所」のラベルを返す。"""
+def _get_predictions(mode: str) -> tuple[dict[str, RacePrediction], str]:
+    """予想結果と「データ出所」のラベルを返す。
+
+    セッションの予想結果は app.py で計算されたモード固定なので、
+    ここで requested mode と一致しない場合はテストデータから再計算する。
+    """
     in_session = st.session_state.get("all_predictions")
     if in_session:
-        return in_session, "セッション中の予想結果(app.py でアップロードしたもの)"
+        sample = next(iter(in_session.values()), None)
+        sess_mode = getattr(sample, "logic_mode", "onmark") if sample else "onmark"
+        if sess_mode == mode:
+            return in_session, f"セッション中の予想結果({mode} モード)"
 
     if TEST_RACE_CARD_PATH.exists():
         try:
-            preds = _predict_test_data()
-            return preds, f"テストデータ自動読み込み({TEST_RACE_CARD_PATH.name})"
+            preds = _predict_test_data(mode)
+            return preds, f"テストデータ({mode} モード / {TEST_RACE_CARD_PATH.name})"
         except Exception as e:
             st.error(f"テストデータの読み込みに失敗: {e}")
             return {}, ""
@@ -269,15 +286,53 @@ def _render_marks_distribution_section(dist: MarksDistribution) -> None:
 # メインレンダリング
 # =====================================================================
 
-st.title("🧭 本ロジック v1.0 ロジック説明")
+st.title("🧭 本ロジック ロジック説明")
 st.caption(
-    "CLAUDE.md「推奨馬選定ロジック(本ロジック v1.0)」の全ルールを、"
+    "CLAUDE.md「推奨馬選定ロジック」の全ルールを、"
     "実データ(出馬表 + 過去走 Parquet)への適用結果と並べて表示します。"
 )
 
-_render_overview()
+# ----- ロジックモード切替トグル -----
+mode = st.radio(
+    "ロジックモード",
+    options=["rating", "onmark"],
+    format_func=lambda x: {
+        "rating": "🆕 v1.1 — レーティング合計(≥100 で ◎)",
+        "onmark": "📜 v1.0 — ○マーク数(≥5 で ◎)",
+    }[x],
+    horizontal=True,
+    index=0,
+)
 
-predictions, source_label = _get_predictions()
+if mode == "rating":
+    st.markdown("""
+    **本ロジック v1.1 (rating-based)** の概要:
+
+    各馬の直近5走を評価し、各カテゴリのルールが該当するごとに rate を加算する。
+    合計 rating が **100 点以上** で ◎本命確定。100 点未満なら最高 rating を準◎にする。
+
+    | カテゴリ | 内容 | rate |
+    |---|---|---|
+    | **C** (14 ルール) | 距離×馬場 別 上3F+通過順位改善 | 50 |
+    | **D** (4 ルール) | 距離無関係 上3F+通過順位改善 | 20 |
+    | **E** (14 ルール) | 距離×馬場 別 上3F のみ(通過順位改善 不要) | 20 |
+    | **F1** | ダート不良 + 逃げ脚質 | 30 |
+    | **F2** | 休養明け前走凡走 → 2,3走前で C/D/E 救済 | 15 |
+    | **F3** | 1600m以上 + 斤量 -3kg(前走比) | 20 |
+    | F4/F5 | 坂路調教 1F/1F+2F ≤ 11.2(TODO: データ未取得) | 30/40 |
+    | **A2-A5** | ワイド候補フラグ(rating には不加算、priority weight) | 4-30 |
+    | **B1-B2** | 減点フラグ(rating には不加算、◎候補から除外) | - |
+
+    **重複処理 (RatingPolicy.STRICT)**:
+    - 過去走 1 行で C/D/E が複数該当 → 最高 rate のみ採用(over-counting 防止)
+    - 同 rule_id が複数走で発火 → 1 回まで(dedup)
+
+    実装: `utils/rating_rules.py` (SSoT) + `utils/rating_engine.py` (計算)
+    """)
+else:
+    _render_overview()
+
+predictions, source_label = _get_predictions(mode)
 
 if not predictions:
     st.info(
@@ -316,22 +371,171 @@ selected_label = st.selectbox(
 )
 selected_race_id = race_label_to_id.get(selected_label)  # 全レース横断なら None
 
-# ----- 全レース分の rule_id インデックス(常に必要) -----
-rule_index_all = index_by_rule(predictions)
+if mode == "onmark":
+    # ===== v1.0 (○マーク方式) ビュー =====
+    rule_index_all = index_by_rule(predictions)
+    col_left, col_right = st.columns([1, 1])
+    with col_left:
+        _render_left_column(LOGIC_CATEGORIES)
+    with col_right:
+        _render_examples_for_race(
+            selected_race=selected_race_id,
+            predictions=predictions,
+            rule_index_all_races=rule_index_all,
+            categories=LOGIC_CATEGORIES,
+        )
+    dist = compute_marks_distribution(predictions)
+    _render_marks_distribution_section(dist)
 
-# ----- 2 カラム本体 -----
-col_left, col_right = st.columns([1, 1])
-with col_left:
-    _render_left_column(LOGIC_CATEGORIES)
+else:
+    # ===== v1.1 (rating-based) ビュー =====
+    col_left, col_right = st.columns([1, 1])
+    with col_left:
+        st.markdown("### 📚 ルール一覧(全 39 ルール)")
+        st.caption("SSoT: `utils/rating_rules.py` / 計算: `utils/rating_engine.py`")
+        for cat_label, rules in [
+            ("【C】距離×馬場 上3F+通過順位改善 (rate 50)", RATING_RULES_C),
+            ("【D】距離無関係 上3F+通過順位改善 (rate 20)", RATING_RULES_D),
+            ("【E】距離×馬場 上3F のみ (rate 20)", RATING_RULES_E),
+            ("【F】補正・特殊条件", RATING_RULES_F),
+            ("【A】戦略・ワイド候補(rating 不加算)", RATING_RULES_A),
+            ("【B】減点(rating 不加算、◎除外)", RATING_RULES_B),
+        ]:
+            with st.expander(cat_label, expanded=False):
+                rows = []
+                for r in rules:
+                    rows.append({
+                        "ID": r.rule_id,
+                        "rate": r.rate,
+                        "rating加算": "○" if r.contributes_to_rating else "—",
+                        "有効": "○" if r.enabled else "TODO",
+                        "概要": r.title,
+                    })
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-with col_right:
-    _render_examples_for_race(
-        selected_race=selected_race_id,
-        predictions=predictions,
-        rule_index_all_races=rule_index_all,
-        categories=LOGIC_CATEGORIES,
+    with col_right:
+        st.markdown("### 🎯 実データへの適用例")
+        if selected_race_id and selected_race_id in predictions:
+            pred = predictions[selected_race_id]
+            ratings_sorted = sorted(
+                pred.horse_ratings, key=lambda r: -r.total_rating,
+            )
+            scope_label = (
+                f"{pred.race_meta.get('racecourse','')} "
+                f"{pred.race_meta.get('race_number','')}R "
+                f"{pred.race_meta.get('race_name','')}"
+            )
+            st.caption(f"対象: **{scope_label}**(レース限定表示)")
+
+            # 軸馬の判定
+            j = pred.judgment
+            if j.main_pick:
+                axis_h = next((r for r in ratings_sorted if r.horse_id == j.main_pick), None)
+                if axis_h:
+                    st.success(
+                        f"◎本命: 馬番{axis_h.horse_number} {axis_h.horse_name} "
+                        f"(rating {axis_h.total_rating} / {axis_h.popularity}人気)"
+                    )
+            elif j.sub_pick:
+                axis_h = next((r for r in ratings_sorted if r.horse_id == j.sub_pick), None)
+                if axis_h:
+                    st.warning(
+                        f"準◎: 馬番{axis_h.horse_number} {axis_h.horse_name} "
+                        f"(rating {axis_h.total_rating} / {axis_h.popularity}人気)"
+                    )
+
+            # 全頭ランキング
+            for r in ratings_sorted:
+                head = (
+                    f"馬番{r.horse_number} {r.horse_name} "
+                    f"({r.popularity}人気 / {r.running_style}) "
+                    f"— **rating {r.total_rating}**"
+                )
+                if r.matched:
+                    with st.expander(head, expanded=False):
+                        for hit in r.matched:
+                            st.write(f"- **{hit.rule_id}** (+{hit.rate}): {hit.reason}")
+                        if r.rule24_active:
+                            st.caption("📌 F2 救済発動 (2,3走前で評価)")
+                else:
+                    st.write(head + "  — 該当ルールなし")
+        else:
+            st.caption(f"対象: **全 {len(predictions)} レース横断**")
+            # 各レースの最高 rating + 本命確定状況
+            rows = []
+            for rid, pred in predictions.items():
+                meta = pred.race_meta
+                top_h = max(pred.horse_ratings, key=lambda r: r.total_rating, default=None)
+                if not top_h:
+                    continue
+                rows.append({
+                    "レース": f"{meta.get('racecourse','')}{meta.get('race_number','')}R",
+                    "最高rating": top_h.total_rating,
+                    "馬名": top_h.horse_name,
+                    "確定": "◎" if pred.judgment.main_pick else ("準◎" if pred.judgment.sub_pick else "—"),
+                })
+            rows.sort(key=lambda r: -r["最高rating"])
+            st.dataframe(pd.DataFrame(rows).head(40), hide_index=True, use_container_width=True)
+
+    # ----- 確定率の可視化(rating 版) -----
+    st.markdown("---")
+    st.markdown("### 📈 ◎ 確定率の可視化(rating ≥ 100 のレース統計)")
+
+    n_main = sum(1 for p in predictions.values() if p.judgment.main_pick)
+    n_sub = sum(1 for p in predictions.values() if p.judgment.sub_pick and not p.judgment.main_pick)
+    main_rate = n_main / len(predictions) * 100 if predictions else 0
+
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric(
+        "◎本命確定レース",
+        f"{n_main} / {len(predictions)}",
+        f"{main_rate:.1f}%",
+    )
+    col_b.metric(
+        "準◎ fallback のみ",
+        f"{n_sub} / {len(predictions)}",
+        f"{n_sub / len(predictions) * 100:.1f}%" if predictions else "0%",
+    )
+    col_c.metric(
+        "本命閾値",
+        f"rating ≥ {HONMEI_RATING_THRESHOLD}",
+        help="utils/rating_rules.py:HONMEI_RATING_THRESHOLD で可変",
     )
 
-# ----- ◎が出にくい問題の可視化 -----
-dist = compute_marks_distribution(predictions)
-_render_marks_distribution_section(dist)
+    # rating ヒストグラム(全頭)
+    rating_buckets: dict[int, int] = {}
+    for p in predictions.values():
+        for r in p.horse_ratings:
+            bucket = (r.total_rating // 20) * 20  # 20点刻み
+            rating_buckets[bucket] = rating_buckets.get(bucket, 0) + 1
+    if rating_buckets:
+        max_b = max(rating_buckets.keys())
+        rows = [
+            {"rating帯(下限)": b, "馬の数": rating_buckets.get(b, 0)}
+            for b in range(0, max_b + 20, 20)
+        ]
+        st.markdown("#### 全頭の rating 分布(20点刻み)")
+        st.bar_chart(pd.DataFrame(rows).set_index("rating帯(下限)"), height=200)
+
+    # 各レース最大 rating
+    st.markdown("#### 各レースの最高 rating")
+    rows_max = []
+    for rid, p in predictions.items():
+        m = p.race_meta
+        top_h = max(p.horse_ratings, key=lambda r: r.total_rating, default=None)
+        if not top_h:
+            continue
+        rows_max.append({
+            "race_id": rid,
+            "場": m.get("racecourse", ""),
+            "R": m.get("race_number", 0),
+            "最高rating": top_h.total_rating,
+            "馬": top_h.horse_name,
+            "確定": "◎" if p.judgment.main_pick else ("準◎" if p.judgment.sub_pick else "—"),
+        })
+    rows_max.sort(key=lambda r: -r["最高rating"])
+    if rows_max:
+        st.dataframe(
+            pd.DataFrame(rows_max).head(40),
+            hide_index=True, use_container_width=True, height=300,
+        )
