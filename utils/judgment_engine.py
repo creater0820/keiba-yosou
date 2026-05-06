@@ -317,6 +317,208 @@ def compute_popularities_from_odds(odds_series: pd.Series) -> pd.Series:
     return rank
 
 
+# ==================================================================
+# v2 (rating-based): 100点以上で◎ + ワイド候補抽出
+# ==================================================================
+
+def detect_demerit_horses_from_ratings(
+    horse_ratings: list,  # list[HorseRating]
+    race_meta: dict,
+) -> list[DemeritEntry]:
+    """
+    rating ベース判定でも減点ルール B1/B2 は同じセマンティクスで適用する。
+    HorseRating の属性を使って既存 detect_demerit_horses 相当を実行する。
+    """
+    entries: list[DemeritEntry] = []
+    racecourse = str(race_meta.get("racecourse", "")).strip()
+    try:
+        distance = int(race_meta.get("distance") or 0)
+    except (ValueError, TypeError):
+        distance = 0
+    is_hanshin_mile = (
+        racecourse == "阪神" and distance == SPECIAL_HANSHIN_DEMERIT_DISTANCE
+    )
+
+    for h in horse_ratings:
+        if h.popularity == 1 and h.running_style == "逃げ":
+            entries.append(DemeritEntry(
+                horse_id=h.horse_id,
+                horse_name=h.horse_name,
+                horse_number=h.horse_number,
+                downgrade_to=2,
+                rule_id="B1",
+                reason="単勝1番人気かつ逃げ脚質 → 軸馬には不適(2着以下扱い)",
+            ))
+        if is_hanshin_mile and h.frame_number in OUTER_FRAMES:
+            entries.append(DemeritEntry(
+                horse_id=h.horse_id,
+                horse_name=h.horse_name,
+                horse_number=h.horse_number,
+                downgrade_to=3,
+                rule_id="B2",
+                reason=f"阪神1600m + {h.frame_number}枠(外枠) → 3着以下扱い",
+            ))
+    return entries
+
+
+def determine_main_pick_v2(
+    horse_ratings: list,  # list[HorseRating]
+    race_meta: dict,
+    threshold: int = 100,
+):
+    """
+    rating ベースの本命判定。
+
+    手順:
+        a) total_rating ≥ threshold(既定 100)を ◎候補に
+        b) 減点ルール B1/B2 該当馬を候補から除外
+        c) 残った候補が複数なら 人気で昇順タイブレーク
+        d) 候補ゼロ → ◎なし、最高 rating 馬を準◎として返す
+
+    戻り値: JudgmentResult(main_pick_marks/sub_pick_marks フィールドは
+            rating 値を流用、UI 互換性を保つため既存 dataclass を再利用)
+    """
+    candidates_raw = [h for h in horse_ratings if h.total_rating >= threshold]
+    candidate_ids = [h.horse_id for h in candidates_raw]
+
+    demerits = detect_demerit_horses_from_ratings(horse_ratings, race_meta)
+    demerit_ids = {d.horse_id for d in demerits}
+    candidates_after = [h for h in candidates_raw if h.horse_id not in demerit_ids]
+    excluded = [hid for hid in candidate_ids if hid in demerit_ids]
+
+    if candidates_after:
+        # 同 rating なら人気上位、同人気なら馬番(stable tiebreak)
+        winner = min(
+            candidates_after,
+            key=lambda h: (
+                -h.total_rating,
+                h.popularity if h.popularity > 0 else 999,
+                h.horse_number,
+            ),
+        )
+        return JudgmentResult(
+            main_pick=winner.horse_id,
+            sub_pick=None,
+            main_pick_marks=winner.total_rating,
+            sub_pick_marks=0,
+            candidates=candidate_ids,
+            excluded_by_demerit=excluded,
+            demerit_entries=demerits,
+            reason=(
+                f"rating ≥ {threshold} の候補 {len(candidates_raw)} 頭"
+                f"(減点除外 {len(excluded)} 頭) → 人気{winner.popularity}番 "
+                f"{winner.horse_name} を本命に確定(rating {winner.total_rating})"
+            ),
+        )
+
+    # 候補ゼロ → 準本命を立てる
+    valid = [h for h in horse_ratings if h.horse_id not in demerit_ids]
+    if valid:
+        sub = max(
+            valid,
+            key=lambda h: (
+                h.total_rating,
+                -(h.popularity if h.popularity > 0 else 999),
+            ),
+        )
+        return JudgmentResult(
+            main_pick=None,
+            sub_pick=sub.horse_id,
+            main_pick_marks=0,
+            sub_pick_marks=sub.total_rating,
+            candidates=candidate_ids,
+            excluded_by_demerit=excluded,
+            demerit_entries=demerits,
+            reason=(
+                f"rating ≥ {threshold} の候補なし → "
+                f"準本命=最高 rating {sub.total_rating} の {sub.horse_name}"
+            ),
+        )
+
+    return JudgmentResult(
+        main_pick=None,
+        sub_pick=None,
+        main_pick_marks=0,
+        sub_pick_marks=0,
+        candidates=candidate_ids,
+        excluded_by_demerit=excluded,
+        demerit_entries=demerits,
+        reason="該当馬なし(全頭減点)",
+    )
+
+
+def extract_wide_candidates_v2(
+    horse_ratings: list,
+    race_meta: dict,
+) -> list[WideCandidate]:
+    """
+    rating ベースのワイド候補抽出。判定 v1 の rule 3/4/5/8 と同じ条件。
+    rule_id は新仕様(A2/A3/A4/A5)で命名し直す。
+    """
+    racecourse = str(race_meta.get("racecourse", "")).strip()
+    is_kokura_or_chukyo = racecourse in RULE8_TRACKS
+
+    fav = next((h for h in horse_ratings if h.popularity == 1), None)
+    fav_frame = fav.frame_number if fav else None
+
+    bucket: dict[str, WideCandidate] = {}
+
+    for h in horse_ratings:
+        matched: list[str] = []
+        reasons: list[str] = []
+
+        # A2: 1番人気の隣枠 + 7番人気以降
+        if (
+            fav_frame is not None
+            and h.popularity >= RULE3_MIN_POPULARITY
+            and _is_adjacent_frame(h.frame_number, fav_frame)
+            and h.horse_id != (fav.horse_id if fav else None)
+        ):
+            matched.append("A2")
+            reasons.append(
+                f"A2: 1番人気({fav.horse_name}/枠{fav_frame})の隣枠 + {h.popularity}番人気"
+            )
+
+        # A3: 前走着順が 5/7/9/11/13
+        if (
+            h.last_finishing_position is not None
+            and h.last_finishing_position in RULE4_BAD_POSITIONS
+        ):
+            matched.append("A3")
+            reasons.append(f"A3: 前走{h.last_finishing_position}着 = ワイド候補着順")
+
+        # A4: 1枠の逃げ + 5番人気以降
+        if (
+            h.frame_number == RULE5_FRAME
+            and h.running_style == "逃げ"
+            and h.popularity >= RULE5_MIN_POPULARITY
+        ):
+            matched.append("A4")
+            reasons.append(f"A4: 1枠の逃げ馬 + {h.popularity}番人気")
+
+        # A5: 小倉/中京 + 逃げ
+        if is_kokura_or_chukyo and h.running_style == "逃げ":
+            matched.append("A5")
+            reasons.append(f"A5: {racecourse}の逃げ馬")
+
+        if matched:
+            bucket[h.horse_id] = WideCandidate(
+                horse_id=h.horse_id,
+                horse_name=h.horse_name,
+                horse_number=h.horse_number,
+                popularity=h.popularity,
+                matched_rules=matched,
+                reasons=reasons,
+                priority=len(matched),
+            )
+
+    candidates = sorted(
+        bucket.values(),
+        key=lambda c: (-c.priority, c.popularity if c.popularity > 0 else 999),
+    )
+    return candidates[:WIDE_CANDIDATE_LIMIT]
+
+
 def get_last_finishing_positions(
     horse_ids: Iterable[str],
     target_date: str,
