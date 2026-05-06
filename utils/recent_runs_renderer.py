@@ -66,7 +66,19 @@ _MATRIX_CSS = f"""
     padding: 8px 12px !important;
     font-weight: 500;
     color: #fff;
-    min-width: 180px;
+    min-width: 240px;
+}}
+/* 馬名ラベル内の当日ジョッキー(前走と同一なら通常色) */
+.recent-runs-matrix .horse-label .jockey-today {{
+    margin-left: 4px;
+    font-size: 11px;
+    color: rgba(255,255,255,0.7);
+    font-weight: normal;
+}}
+/* 当日ジョッキーが前走と異なる時の赤字強調 */
+.recent-runs-matrix .horse-label .jockey-changed {{
+    color: #ef4444;
+    font-weight: bold;
 }}
 .recent-runs-matrix .run-cell {{
     min-width: 110px;
@@ -91,6 +103,16 @@ _MATRIX_CSS = f"""
     padding: 3px 0;
     font-size: 11px;
     color: rgba(255,255,255,0.7);
+}}
+/* 過去走セルの 4 行目: ジョッキー名(漢字数文字想定、はみ出しは省略) */
+.recent-runs-matrix .run-cell .jockey {{
+    padding: 3px 0;
+    font-size: 11px;
+    color: rgba(255,255,255,0.7);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 110px;
 }}
 /* 着順クラス(色塗り廃止 — 構造保持のためクラスは残し、見た目は背景・文字色とも既定) */
 .recent-runs-matrix .pos-1-3,
@@ -141,8 +163,43 @@ _MATRIX_CSS = f"""
 # =====================================================================
 # 内部ヘルパ
 # =====================================================================
-def _format_horse_label(mark: str, horse_number, horse_name: str) -> str:
-    """ '◎ 14 キミガスキダ' 形式の馬ラベル文字列(HTMLエスケープ済み)。"""
+def _is_blank_jockey(value) -> bool:
+    """jockey 値が None / NaN / 空文字 / "(不明)" のいずれかか判定する。"""
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    s = str(value).strip()
+    return s == "" or s == "(不明)"
+
+
+def _is_jockey_changed(today_jockey: str | None, prev_jockey: str | None) -> bool:
+    """当日 jockey と前走 jockey が異なるか(両方 valid のときのみ判定)。"""
+    if _is_blank_jockey(today_jockey) or _is_blank_jockey(prev_jockey):
+        return False
+    return str(today_jockey).strip() != str(prev_jockey).strip()
+
+
+def _format_horse_label(
+    mark: str,
+    horse_number,
+    horse_name: str,
+    today_jockey: str | None = None,
+    jockey_changed: bool = False,
+) -> str:
+    """
+    '◎ 14 キミガスキダ (北村友一)' 形式の馬ラベル(HTML エスケープ済み)。
+
+    today_jockey:
+        - 値があれば「(jockey)」を末尾に追加
+        - 欠損なら「(不明)」表示
+        - 与えられない(None)場合はジョッキー部分を出さない
+    jockey_changed:
+        True なら jockey 部分に jockey-changed クラスを付け赤字強調する。
+    """
     if pd.isna(horse_number):
         hn_str = "—"
     else:
@@ -152,7 +209,21 @@ def _format_horse_label(mark: str, horse_number, horse_name: str) -> str:
             hn_str = str(horse_number)
     mark_part = mark if mark else "&nbsp;&nbsp;"
     safe_name = html.escape(str(horse_name))
-    return f"{mark_part} {hn_str} {safe_name}"
+    base = f"{mark_part} {hn_str} {safe_name}"
+
+    if today_jockey is None:
+        return base
+
+    # 欠損時はラベル「(不明)」、それ以外は「(jockey)」(括弧は span 側で1組のみ)
+    inside = "不明" if _is_blank_jockey(today_jockey) else str(today_jockey).strip()
+    cls = "jockey-today"
+    if jockey_changed:
+        cls = "jockey-today jockey-changed"
+    return (
+        f"{base}<span class=\"{cls}\">"
+        f"({html.escape(inside)})"
+        "</span>"
+    )
 
 
 def _position_class(pos_value) -> str:
@@ -255,6 +326,7 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
             '<div class="position pos-none">──</div>'
             '<div class="course">出走なし</div>'
             '<div class="last3f">──</div>'
+            '<div class="jockey">──</div>'
             "</td>"
         )
 
@@ -315,6 +387,10 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
             last3f_title_attr = ""
     last3f_class_attr = f"last3f {last3f_cls}".rstrip()
 
+    # ----- ジョッキー(4 行目) -----
+    raw_jockey = run.get("jockey")
+    jockey_str = "(不明)" if _is_blank_jockey(raw_jockey) else str(raw_jockey).strip()
+
     return (
         '<td class="run-cell">'
         f'<div class="position {pos_cls}">'
@@ -322,6 +398,7 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
         '</div>'
         f'<div class="course">{html.escape(course_str)}</div>'
         f'<div class="{last3f_class_attr}"{last3f_title_attr}>{html.escape(last3f_str)}</div>'
+        f'<div class="jockey">{html.escape(jockey_str)}</div>'
         "</td>"
     )
 
@@ -355,6 +432,12 @@ def render_recent_runs_matrix(
     # 印・スコアを horse_id でひける map にする
     pred_by_id = {str(p.horse_id): p for p in predictions}
 
+    # 当日のジョッキーを horse_id 単位で引ける dict に
+    today_jockey_by_id: dict[str, str] = {}
+    if "jockey" in race_card_df.columns:
+        for _, row in race_card_df.iterrows():
+            today_jockey_by_id[str(row["horse_id"])] = str(row.get("jockey", "") or "").strip()
+
     # スコア降順に並べる(◎が一番上)
     horse_meta: list[tuple[str, str, object, str, float]] = []
     for _, row in race_card_df.iterrows():
@@ -384,7 +467,17 @@ def render_recent_runs_matrix(
         # runs は [前走, 2走前, ..., 5走前] の直近順。表示も同じく左=前走、右=5走前。
         # 新聞・専門紙の戦歴と同じ並びで「直近の調子」を左端で素早く読める。
 
-        label = _format_horse_label(mark, hn, name)
+        # ----- 当日のジョッキー + 前走比較で赤字判定 -----
+        today_jockey = today_jockey_by_id.get(hid)
+        prev_run = runs[0] if runs else None
+        prev_jockey = prev_run.get("jockey") if isinstance(prev_run, dict) else None
+        jockey_changed = _is_jockey_changed(today_jockey, prev_jockey)
+
+        label = _format_horse_label(
+            mark, hn, name,
+            today_jockey=today_jockey,
+            jockey_changed=jockey_changed,
+        )
         parts.append("<tr>")
         parts.append(f'<td class="horse-label">{label}</td>')
         for run in runs:
