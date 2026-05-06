@@ -424,7 +424,13 @@ def render_predictions_section(
 
     for race_id in sorted(display_predictions.keys(), key=_sort_key):
         p = display_predictions[race_id]
-        with st.expander(_expander_title(p), expanded=False):
+        # ◎本命確定(rating ≥ 100)のレースは expander タイトル全体を緑強調する
+        # ことで、スクロール中に統計バナー記載の確定レース数を一目で識別可能に。
+        # _expander_title() の戻り値自体は変えず、ラッパのみで装飾する。
+        title = _expander_title(p)
+        if p.judgment.main_pick is not None:
+            title = f":green[{title}]"
+        with st.expander(title, expanded=False):
             _render_section_main_pick(p)
             st.divider()
             _render_section_wide(p)
