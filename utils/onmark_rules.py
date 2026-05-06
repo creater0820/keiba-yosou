@@ -133,6 +133,39 @@ def _format_corners(run: dict) -> str:
 # 単一ルール × 単一過去走 の評価
 # ==================================================================
 
+def matches_any_onmark_rule(past_run: dict | None) -> tuple[bool, list[str]]:
+    """
+    過去走 1 行が Rule 9〜22 の少なくとも 1 本に該当するか判定する。
+
+    UI 側(recent_runs_renderer)で「○ルール該当走 → 緑文字」を判定するための
+    薄いラッパ。collect_onmarks() の中身そのものを再利用すると「同一ルールは
+    1走で1回」という馬単位の制約が混ざってしまうため、ここでは過去走 1 行に
+    対する即時判定だけを行う。
+
+    引数:
+        past_run: 過去走 1 行(キー: surface/distance/going/last_3f/racecourse/
+                  corner_1..4)。None や全欠損は (False, []) を返す。
+
+    戻り値:
+        (該当?, 該当したルール ID のリスト)
+        例: (True, ["R9", "R15"])  /  (False, [])
+
+    呼び出し例:
+        is_pass, ids = matches_any_onmark_rule(run)
+        if is_pass:
+            css_class = "last3f-pass"
+            tooltip = f"{', '.join(ids)} 該当"
+    """
+    if past_run is None:
+        return False, []
+    matched: list[str] = []
+    for rule in RULES_9_TO_22:
+        ok, _reason = evaluate_rule(rule, past_run)
+        if ok:
+            matched.append(f"R{rule.rule_no}")
+    return (len(matched) > 0, matched)
+
+
 def evaluate_rule(rule: RuleSpec, run: dict) -> tuple[bool, str]:
     """
     ある過去走 1 行に対して 1 つのルールが該当するか判定する。

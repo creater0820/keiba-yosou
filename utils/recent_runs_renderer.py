@@ -7,9 +7,10 @@ C3 で上がり3F の強調表示を追加する。
 
 条件付きフォーマット(本ファイル単独で完結):
 - 距離が当日と完全一致(±0m)した過去走 → 行頭(セル先頭の着順行)に ★ を付与
-- 上がり3F が AGARI_THRESHOLD 以下の過去走 → 値+「秒」を緑文字で強調
-  閾値は CLAUDE.md にレース条件別の細分があるが、表示用の汎用閾値として
-  33.5 秒(spec の R9 阪神中山特例 / 33秒台前半「好末脚」基準)を採用。
+- ○ルール (Rule 9〜22) が 1 本でも発火する過去走 → 上3F 値+「秒」を緑文字で強調
+  → 単純な閾値判定(旧 AGARI_THRESHOLD = 33.5)は廃止。芝/ダ・距離・馬場・
+    場・通過順位改善 すべてを評価する utils.onmark_rules.matches_any_onmark_rule
+    を再利用する(SSoT を本ロジック v1.0 に統一)。
 """
 
 from __future__ import annotations
@@ -20,15 +21,14 @@ from typing import Iterable
 import pandas as pd
 import streamlit as st
 
+from utils.onmark_rules import matches_any_onmark_rule
 from utils.race_history import get_recent_runs_for_race
 
 
 # =====================================================================
-# 表示用の閾値・色の定数(マジックナンバー禁止)
+# 表示用の色・マーク定数(マジックナンバー禁止)
 # =====================================================================
-# 上3F 緑表示の閾値(秒)。これ「以下」なら緑強調。
-AGARI_THRESHOLD: float = 33.5
-# 緑文字の色値(Tailwind green-500 と同値、CSS 変数化のソース)
+# 緑文字の色値(Tailwind green-500 相当)
 LAST3F_PASS_COLOR: str = "#22c55e"
 # 距離完全一致を示すマーク文字(U+2605)
 DISTANCE_MATCH_STAR: str = "★"
@@ -99,10 +99,12 @@ _MATRIX_CSS = f"""
     color: #ffd54a;
     margin-right: 2px;
 }}
-/* 上がり3F が AGARI_THRESHOLD 以下 → 緑文字 + 太字。秒単位も同色に含める。 */
+/* ○ルール(R9〜R22)が 1 本でも該当 → 緑文字+太字。秒単位も同色に含める。
+   ホバー時に title 属性(該当ルール ID)が tooltip として出る。 */
 .recent-runs-matrix .last3f-pass {{
     color: {LAST3F_PASS_COLOR};
     font-weight: bold;
+    cursor: help;
 }}
 /* 凡例(色チップなし、テキストのみ) */
 .recent-runs-matrix-legend {{
@@ -174,10 +176,11 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
 
     条件付きフォーマット:
     - 距離が当日レースと完全一致 → 着順行の冒頭に ★ を出す(行頭マーカー)
-    - 上がり3F <= AGARI_THRESHOLD → 値+「秒」を緑文字で強調
+    - ○ルール (R9〜R22) のいずれかが発火 → 上3F 値を緑文字で強調 + tooltip に
+      該当ルール ID を表示
 
     target_surface は将来の拡張(同サーフェス絞り込み等)のためにシグネチャに残すが、
-    現仕様では距離のみで判定する(ユーザー指定: ±0m の完全一致のみ)。
+    距離一致 ★ では距離のみで判定する(ユーザー指定: ±0m の完全一致のみ)。
     """
     if run is None:
         return (
@@ -215,22 +218,31 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
         if distance_match else ""
     )
 
-    # ----- 上がり3F + 緑強調 -----
+    # ----- 上がり3F + 緑強調(○ルール R9〜R22 が 1 本でも該当する走) -----
     last_3f = run.get("last_3f")
     if last_3f is None or pd.isna(last_3f):
         last3f_str = "──"
         last3f_cls = ""
+        last3f_title_attr = ""
     else:
         f = float(last_3f)
         last3f_str = f"{f:.1f}秒"
-        last3f_cls = "last3f-pass" if f <= AGARI_THRESHOLD else ""
+        is_pass, matched_rule_ids = matches_any_onmark_rule(run)
+        if is_pass:
+            last3f_cls = "last3f-pass"
+            last3f_title_attr = (
+                f' title="{html.escape(", ".join(matched_rule_ids))} 該当"'
+            )
+        else:
+            last3f_cls = ""
+            last3f_title_attr = ""
     last3f_class_attr = f"last3f {last3f_cls}".rstrip()
 
     return (
         '<td class="run-cell">'
         f'<div class="position {pos_cls}">{star_html}{html.escape(pos_str)}</div>'
         f'<div class="course">{html.escape(course_str)}</div>'
-        f'<div class="{last3f_class_attr}">{html.escape(last3f_str)}</div>'
+        f'<div class="{last3f_class_attr}"{last3f_title_attr}>{html.escape(last3f_str)}</div>'
         "</td>"
     )
 
@@ -313,8 +325,8 @@ def render_recent_runs_matrix(
         '<span class="legend-tag">出走なし</span>'
         f" | <span class=\"distance-match-star\">{DISTANCE_MATCH_STAR}</span>"
         f" = 当日距離({target_distance}m)と完全一致"
-        f" | <span class=\"last3f-pass\">上3F ≤ {AGARI_THRESHOLD:.1f}秒</span>"
-        " = 好末脚"
+        f" | <span class=\"last3f-pass\">緑文字</span>"
+        " = ○ルール(R9〜R22)該当走 — ホバーで該当ルール ID 表示"
         "</div>"
     )
 
