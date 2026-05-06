@@ -79,6 +79,8 @@ RACES_COL: dict[str, int] = {
     "going":              12,
     "horse_name":         13,
     "jockey":             16,
+    # 斤量 (kg、Phase 6.1 / rating rule F3 用)。column [17] = レース当日の斤量。
+    "carry_weight":       17,
     # 真の着順は [20]([21] は完全複製)。複数 G1(大阪杯/東京優駿/皐月賞/JC/
     # ホープフル) でクロワデュノールの実 JRA 着順と一致することを確認済み。
     "finishing_position": 20,
@@ -191,8 +193,9 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
 
     返す列: race_id, race_date, racecourse, race_number, race_name,
             post_time, distance, surface, going, finishing_position,
-            horse_number, horse_id, horse_name, jockey, trainer, weight,
-            weight_change, time, last_3f, popularity, odds,
+            horse_number, horse_id, horse_name, jockey, trainer,
+            weight, carry_weight, weight_change,
+            time, last_3f, popularity, odds,
             corner_1, corner_2, corner_3, corner_4
     """
     if raw.shape[1] != JV_LINK_EXPECTED_COLS:
@@ -274,6 +277,9 @@ def parse_jra_van_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
         "jockey":             col("jockey"),
         "trainer":            col("trainer"),
         "weight":             to_nullable_int(col("weight")),
+        # 斤量(kg、TARGET 形式 column [17])。F3 ルール用。
+        # 整数 kg のはずだが念のため float へ正規化(54.5kg 等の半端値対応)。
+        "carry_weight":       pd.to_numeric(col("carry_weight"), errors="coerce"),
         # weight_change は元データに無い → 0 固定(prediction_logic は未使用)
         "weight_change":      0,
         "time":               time_str,
