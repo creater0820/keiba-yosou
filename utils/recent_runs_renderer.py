@@ -43,7 +43,7 @@ _MATRIX_CSS = f"""
     border-collapse: collapse;
     width: 100%;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 12px;
+    font-size: 14px;
     margin-top: 8px;
 }}
 .recent-runs-matrix th {{
@@ -66,12 +66,12 @@ _MATRIX_CSS = f"""
     padding: 8px 12px !important;
     font-weight: 500;
     color: #fff;
-    min-width: 240px;
+    min-width: 270px;
 }}
 /* 馬名ラベル内の当日ジョッキー(前走と同一なら通常色) */
 .recent-runs-matrix .horse-label .jockey-today {{
     margin-left: 4px;
-    font-size: 11px;
+    font-size: 13px;
     color: rgba(255,255,255,0.7);
     font-weight: normal;
 }}
@@ -81,38 +81,39 @@ _MATRIX_CSS = f"""
     font-weight: bold;
 }}
 .recent-runs-matrix .run-cell {{
-    min-width: 110px;
+    min-width: 130px;
 }}
 .recent-runs-matrix .run-cell .position {{
     padding: 4px 0;
+    font-size: 15px;
     font-weight: bold;
 }}
 /* 通過順(着順の右に併記)。本文より一段階薄くしてノイズを抑える。 */
 .recent-runs-matrix .run-cell .pass-order {{
     margin-left: 4px;
-    font-size: 10px;
+    font-size: 12px;
     font-weight: normal;
     color: rgba(255,255,255,0.65);
 }}
 .recent-runs-matrix .run-cell .course {{
     padding: 3px 0;
-    font-size: 11px;
+    font-size: 13px;
     color: rgba(255,255,255,0.85);
 }}
 .recent-runs-matrix .run-cell .last3f {{
     padding: 3px 0;
-    font-size: 11px;
+    font-size: 13px;
     color: rgba(255,255,255,0.7);
 }}
 /* 過去走セルの 4 行目: ジョッキー名(漢字数文字想定、はみ出しは省略) */
 .recent-runs-matrix .run-cell .jockey {{
     padding: 3px 0;
-    font-size: 11px;
+    font-size: 13px;
     color: rgba(255,255,255,0.7);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 110px;
+    max-width: 130px;
 }}
 /* 着順クラス(色塗り廃止 — 構造保持のためクラスは残し、見た目は背景・文字色とも既定) */
 .recent-runs-matrix .pos-1-3,
@@ -142,7 +143,7 @@ _MATRIX_CSS = f"""
 }}
 /* 凡例(色チップなし、テキストのみ) */
 .recent-runs-matrix-legend {{
-    font-size: 11px;
+    font-size: 13px;
     margin-top: 6px;
     color: rgba(255,255,255,0.7);
 }}
@@ -150,7 +151,7 @@ _MATRIX_CSS = f"""
     display: inline-block;
     padding: 0 4px;
     margin-right: 4px;
-    font-size: 11px;
+    font-size: 13px;
     background: transparent;
     color: inherit;
     border: 1px solid rgba(255,255,255,0.2);

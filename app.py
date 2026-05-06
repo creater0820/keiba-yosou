@@ -59,47 +59,64 @@ st.set_page_config(
 FONT_SCALE_OPTIONS = ["標準", "大", "特大", "最大"]
 
 FONT_SCALE_CSS: dict[str, str] = {
+    # 標準: 戦歴マトリクスの baseline を utils/recent_runs_renderer.py で
+    #       既定値として定義済み(matrix=14 / position=15 / course/last3f/jockey=13
+    #       / pass-order=12 / horse-label=14 / 凡例=13)。
+    #       スライダ「標準」では何も注入しない(現行 baseline 維持)。
     "標準": "",
+    # 大: matrix を +1px 持ち上げ
+    #
+    # CSS specificity 注意: utils/recent_runs_renderer.py の _MATRIX_CSS は
+    # 描画時(後)に注入され、`.recent-runs-matrix` 系セレクタを 0,1,0〜0,3,0
+    # で持っている。本ファイルの FONT_SCALE_CSS は script 先頭で注入される
+    # ので、後勝ちで _MATRIX_CSS に上書きされてしまう。これを防ぐため、
+    # 全セレクタの先頭に `html` を付けて 0,1,1 以上に上げる(html は最上位の
+    # 祖先で常に存在する)。
     "大": """
         <style>
         html { font-size: 17.6px; }
-        [data-testid="stSidebar"] { font-size: 15px; }
-        .recent-runs-matrix { font-size: 13px; }
-        .recent-runs-matrix .horse-label { font-size: 14px; min-width: 260px; }
-        .recent-runs-matrix .run-cell { min-width: 120px; }
-        .recent-runs-matrix .run-cell .position { font-size: 14px; }
-        .recent-runs-matrix .run-cell .course,
-        .recent-runs-matrix .run-cell .last3f,
-        .recent-runs-matrix .run-cell .jockey { font-size: 12px; }
-        .recent-runs-matrix-legend { font-size: 12px; }
+        html [data-testid="stSidebar"] { font-size: 15px; }
+        html .recent-runs-matrix { font-size: 15px; }
+        html .recent-runs-matrix .horse-label { font-size: 15px; min-width: 290px; }
+        html .recent-runs-matrix .run-cell { min-width: 140px; }
+        html .recent-runs-matrix .run-cell .position { font-size: 16px; }
+        html .recent-runs-matrix .run-cell .course,
+        html .recent-runs-matrix .run-cell .last3f,
+        html .recent-runs-matrix .run-cell .jockey { font-size: 14px; }
+        html .recent-runs-matrix .run-cell .pass-order { font-size: 13px; }
+        html .recent-runs-matrix-legend { font-size: 14px; }
         </style>
     """,
+    # 特大: matrix を +2px
     "特大": """
         <style>
         html { font-size: 19.2px; }
-        [data-testid="stSidebar"] { font-size: 17px; }
-        .recent-runs-matrix { font-size: 14px; }
-        .recent-runs-matrix .horse-label { font-size: 16px; min-width: 290px; }
-        .recent-runs-matrix .run-cell { min-width: 130px; }
-        .recent-runs-matrix .run-cell .position { font-size: 16px; }
-        .recent-runs-matrix .run-cell .course,
-        .recent-runs-matrix .run-cell .last3f,
-        .recent-runs-matrix .run-cell .jockey { font-size: 13px; }
-        .recent-runs-matrix-legend { font-size: 13px; }
+        html [data-testid="stSidebar"] { font-size: 17px; }
+        html .recent-runs-matrix { font-size: 16px; }
+        html .recent-runs-matrix .horse-label { font-size: 16px; min-width: 310px; }
+        html .recent-runs-matrix .run-cell { min-width: 150px; }
+        html .recent-runs-matrix .run-cell .position { font-size: 17px; }
+        html .recent-runs-matrix .run-cell .course,
+        html .recent-runs-matrix .run-cell .last3f,
+        html .recent-runs-matrix .run-cell .jockey { font-size: 15px; }
+        html .recent-runs-matrix .run-cell .pass-order { font-size: 14px; }
+        html .recent-runs-matrix-legend { font-size: 15px; }
         </style>
     """,
+    # 最大: matrix を +3px
     "最大": """
         <style>
         html { font-size: 20.8px; }
-        [data-testid="stSidebar"] { font-size: 18px; }
-        .recent-runs-matrix { font-size: 15px; }
-        .recent-runs-matrix .horse-label { font-size: 18px; min-width: 320px; }
-        .recent-runs-matrix .run-cell { min-width: 140px; }
-        .recent-runs-matrix .run-cell .position { font-size: 18px; }
-        .recent-runs-matrix .run-cell .course,
-        .recent-runs-matrix .run-cell .last3f,
-        .recent-runs-matrix .run-cell .jockey { font-size: 14px; }
-        .recent-runs-matrix-legend { font-size: 14px; }
+        html [data-testid="stSidebar"] { font-size: 18px; }
+        html .recent-runs-matrix { font-size: 17px; }
+        html .recent-runs-matrix .horse-label { font-size: 18px; min-width: 340px; }
+        html .recent-runs-matrix .run-cell { min-width: 160px; }
+        html .recent-runs-matrix .run-cell .position { font-size: 18px; }
+        html .recent-runs-matrix .run-cell .course,
+        html .recent-runs-matrix .run-cell .last3f,
+        html .recent-runs-matrix .run-cell .jockey { font-size: 16px; }
+        html .recent-runs-matrix .run-cell .pass-order { font-size: 15px; }
+        html .recent-runs-matrix-legend { font-size: 16px; }
         </style>
     """,
 }
