@@ -409,7 +409,19 @@ def render_predictions_section(
     )
     # ロジックモードを先頭レースから判定して表示
     sample_pred = next(iter(display_predictions.values()), None)
-    if sample_pred and getattr(sample_pred, "logic_mode", "onmark") == "rating":
+    sample_mode = getattr(sample_pred, "logic_mode", "onmark") if sample_pred else "onmark"
+    if sample_mode == "dc":
+        st.warning(
+            "📋 **DC 形式(TARGET 簡易指数)で読み込み中**\n\n"
+            "馬名・騎手・上3F・通過順位・馬場 等の詳細情報が CSV に含まれない"
+            "ため、**TARGET 指数 (col[5]) を rating として直接採用** する簡易"
+            "予想モードで動作しています。馬名は「馬番 N」表記で、騎手変更"
+            "判定や C/D/E ルール群は無効化されています。\n\n"
+            "より詳しい予想を行うには TARGET frontier JV の **「Z メインメニュー → "
+            "開催成績CSV出力 → フルセット+単勝オッズ」** からエクスポートした "
+            "CSV を使用してください(`docs/DAILY_RACE_CARD.md` 参照)。"
+        )
+    elif sample_mode == "rating":
         st.caption(
             "ロジック: **本ロジック v1.1 (rating-based)** — C/D/E/F1/F2/F3 評価で "
             "rating ≥ 100 を ◎本命に確定。"
@@ -523,7 +535,12 @@ def render_predictions_section(
 
             # 直近5走戦歴(Phase 1 のマトリクス)
             with st.expander("📊 直近5走戦歴", expanded=False):
-                race_card_for_this = display_df[display_df["race_id"] == race_id]
+                race_card_for_this = display_df[display_df["race_id"] == race_id].copy()
+                # DC 形式の場合は pred.race_meta["dc_past_runs"] を attrs に
+                # 引き継いでレンダラに渡す(レンダラはこれを優先利用する)。
+                dc_past_runs = p.race_meta.get("dc_past_runs")
+                if dc_past_runs:
+                    race_card_for_this.attrs["dc_past_runs"] = dc_past_runs
                 # マトリクスは旧 HorsePrediction 風の入力を期待していたので、
                 # RacePrediction の horses を擬似的に薄ラッパで渡す。
                 pseudo_preds = [

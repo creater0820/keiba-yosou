@@ -419,6 +419,9 @@ def render_recent_runs_matrix(
         race_card_df: 当該レースの出馬表 DataFrame(1行=1出走馬)
         predictions: そのレースの HorsePrediction リスト(印・スコア取得用)
         historical_df: 過去レース DataFrame(履歴抽出元)
+
+    DC 形式の場合: race_card_df.attrs["dc_past_runs"] に過去走 dict が
+    入っているのでそれを優先して使う。historical_df は無視。
     """
     if race_card_df.empty:
         return
@@ -449,11 +452,17 @@ def render_recent_runs_matrix(
         horse_meta.append((hid, mark, row.get("horse_number"), row["horse_name"], score))
     horse_meta.sort(key=lambda x: -x[4])
 
-    # 履歴を一括キャッシュ取得(同じレースを2回開いても再計算されない)
+    # 履歴の取得経路:
+    # 1. DC 形式の race_card_df.attrs["dc_past_runs"] が優先(DC ファイル同梱)
+    # 2. それ以外は historical_df から血統登録番号で引き当て
     horse_ids_tuple = tuple(m[0] for m in horse_meta)
-    history = get_recent_runs_for_race(
-        horse_ids_tuple, target_date_iso, historical_df, n=5
-    )
+    dc_past_runs = race_card_df.attrs.get("dc_past_runs")
+    if dc_past_runs:
+        history = {hid: dc_past_runs.get(hid, [None] * 5) for hid in horse_ids_tuple}
+    else:
+        history = get_recent_runs_for_race(
+            horse_ids_tuple, target_date_iso, historical_df, n=5
+        )
 
     # ----- HTML 組み立て -----
     parts: list[str] = [_MATRIX_CSS, '<table class="recent-runs-matrix">']

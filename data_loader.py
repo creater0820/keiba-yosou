@@ -26,8 +26,27 @@ from utils.target_format import (
     decode_with_fallback,
     is_dc_format,
     is_jra_van_headerless,
+    parse_dc_dataframe,
     parse_jra_van_dataframe,
 )
+
+
+# ファイル名(DCYYMMDD.CSV)から開催日 ISO 文字列を推定する正規表現。
+# 例: "DC260509.CSV" → "2026-05-09"。お父様の TARGET 出力命名規則に依存。
+import re as _re  # noqa: E402
+
+_DC_FILENAME_RE = _re.compile(r"DC(\d{2})(\d{2})(\d{2})", _re.IGNORECASE)
+
+
+def _infer_target_date_from_dc_filename(filename: str | None) -> str | None:
+    """DC ファイル名から "YYYY-MM-DD" を推定。失敗時は None。"""
+    if not filename:
+        return None
+    m = _DC_FILENAME_RE.search(str(filename))
+    if not m:
+        return None
+    yy, mm, dd = m.group(1), m.group(2), m.group(3)
+    return f"20{yy}-{mm}-{dd}"
 
 # ===== 過去データ読み込み =====
 
@@ -127,21 +146,40 @@ def _read_raw_bytes(uploaded_file: IO | str | Path) -> bytes:
     return Path(uploaded_file).read_bytes()
 
 
-def load_race_card(uploaded_file: IO | str | Path) -> pd.DataFrame:
+def load_race_card(
+    uploaded_file: IO | str | Path,
+    *,
+    filename: str | None = None,
+) -> pd.DataFrame:
     """
     アップロードされた当日出馬表 CSV を DataFrame に変換する。
 
     対応する形式:
-    1. ヘッダー付き普通CSV (列名が race_id, race_date, ... 等の英名)
-       → そのまま pd.read_csv で読む。
-    2. TARGET frontier JV (JRA-VAN) の RA+SE+単勝オッズ 結合 CSV
+    1. **TARGET frontier JV (JRA-VAN) の RA+SE+単勝オッズ 結合 CSV**
        (52列・ヘッダーなし・Shift_JIS が典型)
-       → 位置依存マッピングで内部スキーマに変換。
+       → 全フィールド完備、本ロジック v1.1 (rating-based) でフル動作。
+       df.attrs["data_format"] = "ra_se"
+    2. **TARGET frontier JV の DC(ダイレクト)形式 CSV**(46 列・全数値)
+       → 馬名・騎手・上3F 等は欠落するが、TARGET 指数(col[5])と過去 7 走を
+         取得して簡易予想画面を成立させる。
+       df.attrs["data_format"] = "dc"
+       df.attrs["dc_past_runs"] = {horse_id: [run0..run4]}
+    3. **ヘッダー付き普通CSV**(英名列の自家製 CSV)
+       → そのまま pd.read_csv で読む。data_format は未設定。
 
-    エンコーディングは utf-8-sig → utf-8 → shift_jis → cp932 の順で試行する。
+    DC 形式時はファイル名 "DCYYMMDD.CSV" から開催日を推定する。
+
+    エンコーディングは utf-8-sig → utf-8 → shift_jis → cp932 の順で試行。
     全部失敗したら ValueError(日本語メッセージ)を送出。
     """
     raw_bytes = _read_raw_bytes(uploaded_file)
+
+    # filename を渡されていない場合は uploaded_file から推定
+    if filename is None:
+        if isinstance(uploaded_file, (str, Path)):
+            filename = Path(str(uploaded_file)).name
+        else:
+            filename = getattr(uploaded_file, "name", None)
 
     # 1) エンコーディング自動判定
     try:
@@ -152,25 +190,42 @@ def load_race_card(uploaded_file: IO | str | Path) -> pd.DataFrame:
             "UTF-8 / Shift_JIS / cp932 のいずれかで保存し直してください。"
         ) from e
 
-    # 2a) TARGET DC 系(ダイレクト/データカード)形式の早期検出。
-    #     馬名・騎手・上3F 等の必須情報が含まれないため、ここで日本語ガイド
-    #     付き ValueError を送出して停止する(RA+SE 形式への切替えを案内)。
+    # 2a) TARGET DC 形式の検出。馬名・騎手等は欠落するが、TARGET 指数を
+    #     使った簡易予想モードでアプリを動作させる。
     if is_dc_format(text):
-        raise ValueError(DC_FORMAT_ERROR_MESSAGE)
-
-    # 2b) TARGET 52列ヘッダーなし(RA+SE+単勝オッズ)形式かどうかを1行目で判定
-    if is_jra_van_headerless(text):
-        # ヘッダーなし → 全列文字列で読み込み、内部スキーマへ変換
         raw_df = pd.read_csv(
             io.StringIO(text),
             header=None,
             dtype=str,
             low_memory=False,
         )
-        return parse_jra_van_dataframe(raw_df)
+        target_date_iso = _infer_target_date_from_dc_filename(filename)
+        race_card_df, past_runs_by_horse = parse_dc_dataframe(
+            raw_df, target_date_iso=target_date_iso,
+        )
+        race_card_df.attrs["data_format"] = "dc"
+        race_card_df.attrs["dc_past_runs"] = past_runs_by_horse
+        race_card_df.attrs["source_filename"] = filename or ""
+        return race_card_df
+
+    # 2b) TARGET 52列ヘッダーなし(RA+SE+単勝オッズ)形式
+    if is_jra_van_headerless(text):
+        raw_df = pd.read_csv(
+            io.StringIO(text),
+            header=None,
+            dtype=str,
+            low_memory=False,
+        )
+        df = parse_jra_van_dataframe(raw_df)
+        df.attrs["data_format"] = "ra_se"
+        df.attrs["source_filename"] = filename or ""
+        return df
 
     # 3) ヘッダー付き普通CSV(既存サンプルや日本語列名 CSV はこのパス)
-    return pd.read_csv(io.StringIO(text))
+    df = pd.read_csv(io.StringIO(text))
+    df.attrs["data_format"] = "header_csv"
+    df.attrs["source_filename"] = filename or ""
+    return df
 
 
 @st.cache_data(show_spinner="出馬表を読み込み中…")
@@ -186,7 +241,7 @@ def load_race_card_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     再利用するたびに seek が必要なため、Streamlit 側ですでに getvalue() してから
     呼び出すことを期待している。
     """
-    return load_race_card(io.BytesIO(file_bytes))
+    return load_race_card(io.BytesIO(file_bytes), filename=file_name)
 
 
 @dataclass
@@ -198,14 +253,41 @@ class ValidationResult:
     message: str                  # 画面表示用の日本語メッセージ
 
 
+# DC 形式で最低限揃っていれば OK とする緩い必須列セット
+DC_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "race_id", "race_date", "racecourse", "race_number",
+    "horse_id", "horse_number", "horse_name",
+    "distance", "surface", "target_index",
+)
+
+
 def validate_race_card(df: pd.DataFrame) -> ValidationResult:
     """
     出馬表の列構成をチェック。
-    必須列が揃っていれば ok=True。不足があれば不足列名と期待列一覧を日本語で返す。
+    DC 形式(df.attrs["data_format"] == "dc")の場合は緩い検証(最低限の列だけ)。
+    それ以外は従来通り REQUIRED_RACE_CARD_COLUMNS を全て要求する。
     """
     actual = set(df.columns)
-    expected = set(REQUIRED_RACE_CARD_COLUMNS)
+    data_format = df.attrs.get("data_format", "")
 
+    if data_format == "dc":
+        expected = set(DC_REQUIRED_COLUMNS)
+        missing = sorted(expected - actual)
+        if missing:
+            msg = (
+                "DC 形式として読み込みましたが、必要な列が不足しています。\n"
+                f"不足している列: {', '.join(missing)}"
+            )
+            return ValidationResult(
+                ok=False, missing_columns=missing, extra_columns=[], message=msg,
+            )
+        return ValidationResult(
+            ok=True, missing_columns=[], extra_columns=[],
+            message="DC 形式で読み込み(簡易予想モード)",
+        )
+
+    # RA+SE / ヘッダー付き CSV: 従来の厳しい検証
+    expected = set(REQUIRED_RACE_CARD_COLUMNS)
     missing = sorted(expected - actual)
     extra = sorted(actual - expected)
 
