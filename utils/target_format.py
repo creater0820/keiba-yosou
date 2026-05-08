@@ -324,6 +324,199 @@ def is_jra_van_headerless(text: str) -> bool:
     return True
 
 
+# =====================================================================
+# TARGET frontier JV の DC(ダイレクト/データカード)形式パーサ
+# =====================================================================
+# DC 形式は JRA-VAN DataLab の最終成果物に近い指数特化フォーマット。
+# 本アプリが必要とする 馬名 / 騎手 / 上3F / 通過順位 / 馬場 等は持たないが、
+# 1) 当日の馬番・距離・サーフェス・**TARGET 指数**(本紙総合指数相当)
+# 2) 過去 7 走 ×(場 / 距離 / surface / 着順 / 指数)
+# は取得可能なので、簡易 rating(指数を直接スコアに使う)+ 戦歴マトリクスで
+# 「動く予想画面」を成立させる。
+
+# 列レイアウト(0-index):
+#   col[0]  10桁 ID  = JRA場(2) + 年下2桁 + 開催コード(2) + R番(2) + 馬番(2)
+#   col[1]  TARGET 内部場コード(per-race 固定。意味不明確、未デコード)
+#   col[2]  距離 (m)
+#   col[3]  surface コード(0=芝 / 1=ダ / 2=障害(今回の出走) / 3=障害(過去) / 8=その他)
+#   col[4]  クラス/グレード(8-18 程度、未デコード)
+#   col[5]  当日の TARGET 指数(0 or 80-130 の整数、本紙総合指数相当)
+#   col[6]  馬属性指数(用途不明、表示未使用)
+#   col[7-9] パディング 0
+#   col[10..44] = 過去 7 走 × 5 列(track_code, distance, surface, finishing_pos, target_index)
+
+DC_EXPECTED_COLS = 46           # 末尾カンマで 1 列増えて 46 になる典型(45 列 + NaN)
+DC_PAST_RUNS_PER_HORSE = 7      # col[10..44] = 5 × 7 走
+DC_FIRST_PAST_RUN_COL = 10
+DC_PAST_RUN_BLOCK_SIZE = 5
+
+# col[0][:2] = JRA 公式場コード(2桁 0-padded)
+JRA_COURSE_BY_CODE: dict[str, str] = {
+    "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
+    "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉",
+}
+
+# DC 形式の surface コード(実データ DC260509 で観測):
+#   0 = 芝(一般・直線/内回り等)
+#   1 = ダート
+#   2 = 障害(今回出走、距離 2880-2890m 系)
+#   3 = 障害(過去走の別表現)
+#   8 = 芝(外回り・特別?、京都11R 天皇賞春G1 2200m / 京都9R 1600m /
+#         新潟10R 1800m が該当 → 全て芝レースで確定)
+DC_SURFACE_BY_CODE: dict[str, str] = {
+    "0": "芝", "1": "ダ", "2": "障", "3": "障", "8": "芝",
+}
+
+
+def parse_dc_dataframe(
+    raw: pd.DataFrame,
+    *,
+    target_date_iso: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, list[dict | None]]]:
+    """
+    DC 形式の生 DataFrame(header=None / dtype=str)を、当日出馬表として
+    アプリ内部スキーマに変換する。
+
+    引数:
+        raw: pd.read_csv(header=None, dtype=str) で読んだ DC 形式 CSV
+        target_date_iso: "YYYY-MM-DD" 形式の対象日。None ならファイル名から
+            推定したいが pd.DataFrame には情報がないので呼び出し側で渡す。
+
+    戻り値:
+        race_card_df: アプリの当日出馬表スキーマに揃えた DataFrame
+                      (data_format="dc" の attrs 付与は呼び出し側で行う)
+        past_runs_by_horse: {horse_id: [run0..run4]} 形式の過去走 dict
+                            run の中身は dict (surface, distance, finishing_position,
+                            last_3f=NaN, racecourse, jockey="(不明)" 等)
+    """
+    if raw.shape[1] < DC_EXPECTED_COLS - 2:
+        raise ValueError(
+            f"DC 形式は {DC_EXPECTED_COLS} 列前後を想定していますが、"
+            f"{raw.shape[1]} 列でした。フォーマットを確認してください。"
+        )
+
+    # 全セル strip(空白パディング除去)
+    raw = raw.apply(lambda c: c.astype(str).str.strip())
+
+    # ----- ID 分解(col[0] = 10 桁) -----
+    id_col = raw[0].fillna("").astype(str)
+    jra_code = id_col.str[:2]
+    yy_code = id_col.str[2:4]
+    meeting_code = id_col.str[4:6]   # 回+日目(13/25/35 等)
+    race_no_str = id_col.str[6:8]
+    horse_no_str = id_col.str[8:10]
+
+    racecourse = jra_code.map(JRA_COURSE_BY_CODE).fillna("不明")
+    race_number = pd.to_numeric(race_no_str, errors="coerce").astype("Int64")
+    horse_number = pd.to_numeric(horse_no_str, errors="coerce").astype("Int64")
+
+    # race_id 生成: target_date_iso が既知ならそれを使う、無ければ年は 20xx 推定
+    if target_date_iso:
+        date_str = target_date_iso
+    else:
+        # フォールバック(年月日不明): yy + 開催コードから簡易生成
+        date_str = "20" + yy_code + "-00-00"
+
+    # race_id = R{YYYYMMDD}-{場頭文字}{R番zfill2}
+    race_id = (
+        "R" + date_str.replace("-", "")
+        + "-" + racecourse.str[:1]
+        + race_number.astype("string").str.zfill(2)
+    )
+    # 1 馬 1 行を識別する horse_id(血統番号は無いので合成 ID)
+    horse_id = (
+        "DC-" + jra_code + "-" + meeting_code + "-"
+        + race_no_str + "-" + horse_no_str
+    )
+
+    # ----- 距離 / surface(今回レース) -----
+    distance = pd.to_numeric(raw[2], errors="coerce").astype("Int64")
+    surface = raw[3].map(DC_SURFACE_BY_CODE).fillna("?")
+    target_index = pd.to_numeric(raw[5], errors="coerce")
+
+    # 馬名は持たない → 「馬番N」で代替
+    horse_name = "馬番" + horse_number.astype("string")
+
+    # 出馬表 DataFrame を組み立て
+    race_card_df = pd.DataFrame({
+        "race_id":            race_id,
+        "race_date":          date_str,
+        "racecourse":         racecourse,
+        "race_number":        race_number,
+        "race_name":          "(レース名不明)",
+        "post_time":          "",       # DC には発走時刻なし
+        "distance":           distance,
+        "surface":            surface,
+        "going":              "",       # 馬場状態なし
+        "finishing_position": pd.array([pd.NA] * len(raw), dtype="Int64"),
+        "horse_number":       horse_number,
+        "horse_id":           horse_id,
+        "horse_name":         horse_name,
+        "jockey":             "(不明)",
+        "trainer":            "",
+        "weight":             pd.array([pd.NA] * len(raw), dtype="Int64"),
+        "carry_weight":       pd.NA,
+        "weight_change":      0,
+        "time":               "",
+        "last_3f":            pd.NA,
+        "popularity":         pd.array([pd.NA] * len(raw), dtype="Int64"),
+        "odds":               pd.NA,
+        "corner_1":           pd.NA, "corner_2": pd.NA,
+        "corner_3":           pd.NA, "corner_4": pd.NA,
+        # DC 専用列
+        "target_index":       target_index,
+    })
+
+    # ----- 過去走 7 走を辞書化 -----
+    past_runs_by_horse: dict[str, list[dict | None]] = {}
+    for idx, row in raw.iterrows():
+        hid = race_card_df.iloc[idx]["horse_id"]
+        runs: list[dict | None] = []
+        for run_i in range(DC_PAST_RUNS_PER_HORSE):
+            base = DC_FIRST_PAST_RUN_COL + run_i * DC_PAST_RUN_BLOCK_SIZE
+            if base + DC_PAST_RUN_BLOCK_SIZE > len(row):
+                runs.append(None)
+                continue
+            try:
+                track_code = str(row.iloc[base]).strip()
+                p_dist = pd.to_numeric(row.iloc[base + 1], errors="coerce")
+                p_surf_code = str(row.iloc[base + 2]).strip()
+                p_pos = pd.to_numeric(row.iloc[base + 3], errors="coerce")
+                p_idx = pd.to_numeric(row.iloc[base + 4], errors="coerce")
+            except Exception:
+                runs.append(None)
+                continue
+            # 全部 0 / 欠損なら出走なし扱い
+            if (pd.isna(p_dist) or p_dist == 0) and (pd.isna(p_pos) or p_pos == 0):
+                runs.append(None)
+                continue
+            runs.append({
+                # アプリ内部スキーマに合わせる(欠損は NaN/None)
+                "race_date":          "",
+                "racecourse":         "",            # TARGET 内部場コードのデコード未対応
+                "surface":            DC_SURFACE_BY_CODE.get(p_surf_code, "?"),
+                "distance":           int(p_dist) if pd.notna(p_dist) else 0,
+                "finishing_position": int(p_pos) if pd.notna(p_pos) else None,
+                "last_3f":            None,
+                "going":              "",
+                "jockey":             "(不明)",
+                "carry_weight":       None,
+                "corner_1":           None, "corner_2": None,
+                "corner_3":           None, "corner_4": None,
+                # DC 専用: 過去走の TARGET 指数
+                "target_index":       int(p_idx) if pd.notna(p_idx) and p_idx > 0 else None,
+                # 元の TARGET 内部場コード(マッピング表ができたら表示用に使う)
+                "_dc_track_code":     track_code,
+            })
+        # 直近 5 走に揃える(余りは捨てる、不足はパディング)
+        runs5 = runs[:5]
+        while len(runs5) < 5:
+            runs5.append(None)
+        past_runs_by_horse[hid] = runs5
+
+    return race_card_df, past_runs_by_horse
+
+
 def is_dc_format(text: str) -> bool:
     """
     TARGET frontier JV の **DC(ダイレクト)系メニュー** から出力された CSV か判定。

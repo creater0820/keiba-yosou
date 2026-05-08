@@ -320,6 +320,130 @@ def predict_race_v2(
     )
 
 
+def predict_race_dc(
+    race_card_df: pd.DataFrame,
+    historical: HistoricalData | pd.DataFrame,
+    target_date: str | None = None,
+) -> RacePrediction:
+    """DC 形式 CSV 専用の簡易予想。
+
+    DC 形式は 馬名・騎手・上3F・通過順位・馬場・過去走 race_date を持たないため
+    本来の C/D/E/F1/F2/F3 ルール群はすべて発火不可能。代替として:
+
+    - **TARGET 指数(col[5])** を直接 rating 値として採用
+    - 過去 7 走は race_card_df.attrs["dc_past_runs"] から取得(DC ファイル
+      自体に同梱されている)
+    - 減点 B1/B2 は人気・脚質情報が無いため適用しない
+    - ワイド候補は TARGET 指数 上位馬から採る(同 priority weight)
+
+    本関数の戻り値は logic_mode="dc" の RacePrediction。app.py のレンダラは
+    既存の RA+SE 用パスを再利用しつつ、DC 固有のセクション(過去走マトリクス
+    が DC 形式の付属データを使う等)を分岐表示する。
+    """
+    meta = _build_race_meta(race_card_df)
+    if target_date is None:
+        target_date = meta.get("race_date", "")
+
+    past_runs_by_horse = race_card_df.attrs.get("dc_past_runs", {})
+
+    # 1) HorseRating 相当のリストを TARGET 指数から組み立て
+    horse_ratings: list[HorseRating] = []
+    for _, row in race_card_df.reset_index(drop=True).iterrows():
+        hid = str(row["horse_id"])
+        try:
+            hn = int(row["horse_number"]) if pd.notna(row["horse_number"]) else 0
+        except (ValueError, TypeError):
+            hn = 0
+        try:
+            ti = float(row["target_index"]) if pd.notna(row["target_index"]) else 0.0
+        except (ValueError, TypeError):
+            ti = 0.0
+        rating = HorseRating(
+            horse_id=hid,
+            horse_name=str(row["horse_name"]),
+            horse_number=hn,
+            frame_number=0,             # DC では枠番不明 → 0
+            popularity=0,                # DC では人気不明 → 0
+            running_style="不明(先行扱い)",  # 通過順位不明
+            total_rating=int(round(ti)),
+            matched=[],                  # ルール集計しない(rating = TARGET 指数のみ)
+            last_finishing_position=None,
+            today_carry_weight=None,
+            rule24_active=False,
+        )
+        horse_ratings.append(rating)
+
+    # 2) 本命判定: rating ≥ HONMEI_RATING_THRESHOLD(=100)を◎候補に
+    judgment = determine_main_pick_v2(
+        horse_ratings, meta, threshold=HONMEI_RATING_THRESHOLD,
+    )
+
+    # 3) ワイド候補: 軸馬を除いた rating 上位 2-3 頭を A2 相当で出す
+    axis_id = judgment.main_pick or judgment.sub_pick
+    sorted_ratings = sorted(horse_ratings, key=lambda r: -r.total_rating)
+    wides: list[WideCandidate] = []
+    for r in sorted_ratings:
+        if r.horse_id == axis_id:
+            continue
+        if r.total_rating < 80:  # DC では指数 80 未満は候補から外す
+            continue
+        wides.append(WideCandidate(
+            horse_id=r.horse_id,
+            horse_name=r.horse_name,
+            horse_number=r.horse_number,
+            popularity=0,
+            matched_rules=["DC"],
+            reasons=[f"DC: TARGET 指数 {r.total_rating}"],
+            priority=r.total_rating,
+        ))
+        if len(wides) >= 3:
+            break
+
+    # 4) 簡易な HorseMarkData リスト(UI 互換用に最小限の値を入れる)
+    horses_v1: list[HorseMarkData] = []
+    for r in horse_ratings:
+        horses_v1.append(HorseMarkData(
+            horse_id=r.horse_id,
+            horse_name=r.horse_name,
+            horse_number=r.horse_number,
+            frame_number=r.frame_number,
+            popularity=r.popularity,
+            running_style=r.running_style,
+            marks_count=0,
+            matched_rules=[],
+            last_finishing_position=None,
+        ))
+
+    # 5) 買い目生成(既存ヘルパで OK)
+    betting = generate_betting_recommendations(
+        judgment.main_pick, judgment.sub_pick, wides, horses_v1
+    )
+
+    pred = RacePrediction(
+        race_id=meta.get("race_id", ""),
+        race_meta=meta,
+        horses=horses_v1,
+        judgment=judgment,
+        wide_candidates=wides,
+        betting=betting,
+        demerit_entries=judgment.demerit_entries,
+        logic_mode="dc",
+        horse_ratings=horse_ratings,
+    )
+    # 過去走を pred の race_meta に格納(レンダラが参照する)
+    pred.race_meta["dc_past_runs"] = {
+        hid: runs for hid, runs in past_runs_by_horse.items()
+        if any(r.race_id == race_card_df.iloc[0]["race_id"]
+               for r in [pred] if hid in {h.horse_id for h in horses_v1})
+    }
+    # シンプルに同レースの全馬の過去走を格納
+    pred.race_meta["dc_past_runs"] = {
+        h.horse_id: past_runs_by_horse.get(h.horse_id, [None] * 5)
+        for h in horses_v1
+    }
+    return pred
+
+
 def predict_race(
     race_card_df: pd.DataFrame,
     historical: HistoricalData | pd.DataFrame,
@@ -327,7 +451,15 @@ def predict_race(
     *,
     mode: str | None = None,
 ) -> RacePrediction:
-    """LOGIC_MODE に従って v1 / v2 を dispatch する公開関数。"""
+    """データ形式と LOGIC_MODE に従って予想関数を dispatch。
+
+    DC 形式(race_card_df.attrs["data_format"] == "dc")が最優先で、
+    TARGET 指数ベースの簡易予想 (predict_race_dc) を起動する。
+    それ以外は LOGIC_MODE / mode 引数で v1 / v2 を切り替え。
+    """
+    if race_card_df.attrs.get("data_format") == "dc":
+        return predict_race_dc(race_card_df, historical, target_date)
+
     chosen = mode or LOGIC_MODE
     if chosen == "rating":
         return predict_race_v2(race_card_df, historical, target_date)
@@ -340,9 +472,16 @@ def predict_all_races_v1(
     *,
     mode: str | None = None,
 ) -> dict[str, RacePrediction]:
-    """出馬表全体を race_id 単位で予想する(LOGIC_MODE / mode 引数で切替)。"""
+    """出馬表全体を race_id 単位で予想する(LOGIC_MODE / mode 引数で切替)。
+
+    pandas の groupby は df.attrs を子グループに伝播しないため、ここで明示的に
+    attrs(data_format / dc_past_runs)をコピーして predict_race に渡す。
+    """
+    parent_attrs = dict(race_card_df.attrs or {})
     results: dict[str, RacePrediction] = {}
     for race_id, group in race_card_df.groupby("race_id", sort=False):
+        # groupby 後の group には attrs が乗っていないので親の attrs を引き継ぐ
+        group.attrs = parent_attrs
         target_date = str(group["race_date"].iloc[0])
         results[str(race_id)] = predict_race(group, historical, target_date, mode=mode)
     return results

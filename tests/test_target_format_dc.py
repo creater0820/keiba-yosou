@@ -89,33 +89,41 @@ def test_dc_format_rejects_extreme_column_counts():
 
 
 # ==================================================================
-# load_race_card: DC 検出時に日本語ガイド ValueError を送出
+# load_race_card: DC 形式パース成功 + 簡易予想モードで動作
 # ==================================================================
-def test_load_race_card_raises_helpful_error_on_dc():
-    """実 DC260509.CSV でアップロードしたとき、日本語ガイドが出ること。"""
+def test_load_race_card_parses_dc_with_attrs():
+    """実 DC260509.CSV を読み込むと parse 成功し data_format='dc' が attrs に乗る。"""
     dc_path = ROOT / "data" / "raw" / "DC260509.CSV"
     if not dc_path.exists():
-        # CI 環境等で raw データが無い場合はスキップ(spec のサンプル行から再構成)
-        # 同 spec で text を作って test
-        from io import BytesIO
-        text = (_DC_FIRST_LINE + "\n") * 5  # 5 行
-        try:
-            load_race_card(BytesIO(text.encode("cp932")))
-        except ValueError as e:
-            assert "DC" in str(e) or "ダイレクト" in str(e)
-            return
-        raise AssertionError("ValueError が送出されなかった")
+        return  # CI 環境等で raw データが無ければスキップ
 
-    try:
-        load_race_card(dc_path)
-    except ValueError as e:
-        msg = str(e)
-        # 日本語ガイドの主要キーワードが含まれていること
-        assert "DC" in msg, f"DC キーワード欠落: {msg[:120]}"
-        assert "フルセット+単勝オッズ" in msg, "RA+SE への切替案内が欠落"
-        assert "メインメニュー" in msg, "TARGET メニュー名の案内が欠落"
+    df = load_race_card(dc_path)
+    # 読み込み成功
+    assert df.attrs.get("data_format") == "dc", \
+        f"data_format must be 'dc', got {df.attrs.get('data_format')}"
+    # 過去走 dict が attrs に格納されている
+    past_runs = df.attrs.get("dc_past_runs")
+    assert isinstance(past_runs, dict) and len(past_runs) > 0, \
+        "dc_past_runs が attrs に乗っていない"
+    # DC 必須列が揃っている
+    for col in ("race_id", "race_date", "racecourse", "race_number",
+                "horse_id", "horse_number", "horse_name",
+                "distance", "surface", "target_index"):
+        assert col in df.columns, f"DC 必須列 {col} が欠落"
+    # 36 レース分の馬データが期待される
+    assert len(df) > 400, f"unexpected DC row count: {len(df)}"
+
+
+def test_load_race_card_dc_jra_codes_decoded():
+    """DC 形式の col[0][:2] が JRA 場名(新潟/東京/京都 等)に変換されている。"""
+    dc_path = ROOT / "data" / "raw" / "DC260509.CSV"
+    if not dc_path.exists():
         return
-    raise AssertionError("DC ファイルなのに ValueError が出なかった")
+    df = load_race_card(dc_path)
+    courses = set(df["racecourse"].unique())
+    # 2026-05-09 開催の 3 場(新潟・東京・京都)
+    assert {"新潟", "東京", "京都"} <= courses, \
+        f"JRA 場名のデコードに失敗: {courses}"
 
 
 def test_dc_error_message_constants():
