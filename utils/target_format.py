@@ -324,6 +324,71 @@ def is_jra_van_headerless(text: str) -> bool:
     return True
 
 
+def is_dc_format(text: str) -> bool:
+    """
+    TARGET frontier JV の **DC(ダイレクト)系メニュー** から出力された CSV か判定。
+
+    DC 形式の特徴:
+    - ヘッダー行なし
+    - 全セル数値(コード値・距離・指数など、文字列情報なし)
+    - 列数 30〜80 前後(典型 46 列 = 10 ベース + 5 × 7 過去走)
+    - 1 列目が 10 桁数字(2桁場 + 2桁年 + 2桁開催 + 2桁R + 2桁馬番)
+
+    判定ルール(全て AND):
+    - 列数が JV-Link 52 列形式ではない(明確に区別)
+    - 1 行目の 1 列目を strip した文字列が 10 桁数字
+    - 1 行目の 1〜10 列目すべてが strip 後に数値として読める
+    - 列数が 30 以上 80 未満(極端な誤認回避)
+
+    DC 形式は本アプリで必要な情報(馬名・騎手・上3F・通過順位・馬場 等)を
+    含まないため、検出時は早期に専用エラーを出し、お父様に正しいメニュー
+    (Z → 開催成績CSV出力 → フルセット+単勝オッズ)への切り替えを案内する。
+    """
+    if not text:
+        return False
+    first_line = text.split("\n", 1)[0].rstrip("\r")
+    fields = [f.strip().strip('"') for f in first_line.split(",")]
+    n_fields = len(fields)
+    if n_fields == JV_LINK_EXPECTED_COLS:
+        # RA+SE 形式に乗っ取られないよう明示除外
+        return False
+    if not (30 <= n_fields < 80):
+        return False
+    # 1 列目: 10 桁数字
+    if not (len(fields[0]) == 10 and fields[0].isdigit()):
+        return False
+    # 先頭 10 列がすべて数値として読めること
+    for v in fields[:10]:
+        if v == "":
+            continue
+        # 整数値想定(空白パディング除去後)
+        try:
+            int(v)
+        except ValueError:
+            return False
+    return True
+
+
+# DC 形式検出時にユーザーへ表示する日本語エラー文言。
+# load_race_card() から ValueError として送出され、app.py の except 節が
+# st.error() でそのまま表示する想定。
+DC_FORMAT_ERROR_MESSAGE = (
+    "この CSV は **TARGET frontier JV の DC(ダイレクト/データカード)系メニュー** からの出力のようです。\n\n"
+    "本アプリは『**メインメニュー(Z) → 開催成績CSV出力 → フルセット+単勝オッズ**』からの "
+    "エクスポート(52 列形式)を想定しています。\n\n"
+    "DC 形式には 馬名 / 騎手 / 斤量 / 上3F / 通過順位 / 馬場 等の情報が含まれないため、"
+    "予想ロジックを動かすことができません。\n\n"
+    "**お父様への手順案内:**\n"
+    "1. TARGET frontier JV を起動\n"
+    "2. メインメニュー(Z)を開く\n"
+    "3. 「開催成績CSV出力」を選択\n"
+    "4. 出力形式で「フルセット+単勝オッズ」を選択\n"
+    "5. 当日のレースを範囲指定して CSV 保存\n"
+    "6. その CSV を再度本アプリにアップロード\n\n"
+    "詳細手順は `docs/DAILY_RACE_CARD.md` をご参照ください。"
+)
+
+
 def decode_with_fallback(raw_bytes: bytes) -> tuple[str, str]:
     """
     バイト列を utf-8-sig → utf-8 → shift_jis → cp932 の順で復号試行。

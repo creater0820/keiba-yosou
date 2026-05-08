@@ -22,7 +22,9 @@ import pandas as pd
 import streamlit as st
 
 from utils.target_format import (
+    DC_FORMAT_ERROR_MESSAGE,
     decode_with_fallback,
+    is_dc_format,
     is_jra_van_headerless,
     parse_jra_van_dataframe,
 )
@@ -150,7 +152,13 @@ def load_race_card(uploaded_file: IO | str | Path) -> pd.DataFrame:
             "UTF-8 / Shift_JIS / cp932 のいずれかで保存し直してください。"
         ) from e
 
-    # 2) TARGET 52列ヘッダーなし形式かどうかを1行目で判定
+    # 2a) TARGET DC 系(ダイレクト/データカード)形式の早期検出。
+    #     馬名・騎手・上3F 等の必須情報が含まれないため、ここで日本語ガイド
+    #     付き ValueError を送出して停止する(RA+SE 形式への切替えを案内)。
+    if is_dc_format(text):
+        raise ValueError(DC_FORMAT_ERROR_MESSAGE)
+
+    # 2b) TARGET 52列ヘッダーなし(RA+SE+単勝オッズ)形式かどうかを1行目で判定
     if is_jra_van_headerless(text):
         # ヘッダーなし → 全列文字列で読み込み、内部スキーマへ変換
         raw_df = pd.read_csv(
