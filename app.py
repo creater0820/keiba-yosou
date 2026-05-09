@@ -38,6 +38,10 @@ from prediction_logic import (
     predict_all_races_cached,
 )
 from utils.recent_runs_renderer import render_recent_runs_matrix
+from utils.training_data import (
+    match_training_to_horses,
+    parse_training_csv,
+)
 
 
 # =====================================================================
@@ -366,12 +370,28 @@ def _render_section_all_marks(pred: RacePrediction) -> None:
                                 )
                         # 評価試行ログ:発火しなかったが評価対象になったルール
                         if r.missed_rule_ids:
+                            # F4/F5 を「坂路 CSV 未提供」/「該当走なし(C/D/E)」に分けて表示
+                            f_missed = [m for m in r.missed_rule_ids if m in ("F4", "F5")]
+                            cde_missed = [m for m in r.missed_rule_ids if m not in ("F4", "F5")]
                             st.markdown("**評価試行(該当走なし):**")
-                            st.caption(
-                                f"{', '.join(r.missed_rule_ids)} — surface・距離区分は"
-                                "一致したが、上3F や 通過順位改善 等の付帯条件を"
-                                "満たす過去走がなかった。"
-                            )
+                            if cde_missed:
+                                st.caption(
+                                    f"{', '.join(cde_missed)} — surface・距離区分は"
+                                    "一致したが、上3F や 通過順位改善 等の付帯条件を"
+                                    "満たす過去走がなかった。"
+                                )
+                            if f_missed:
+                                if training_bytes is not None:
+                                    st.caption(
+                                        f"{', '.join(f_missed)} — 坂路 CSV と馬名"
+                                        "マッチしなかった、または Lap1/Lap2 が "
+                                        "11.2 秒を超えていた(発火条件未充足)。"
+                                    )
+                                else:
+                                    st.caption(
+                                        f"{', '.join(f_missed)} — 坂路調教 CSV 未提供"
+                                        "のためスキップ(② のアップローダで読込み可)。"
+                                    )
                         elif not r.matched and not is_matched:
                             # マッチ失敗馬: rate=0、「評価不能」を明示
                             st.warning(
@@ -481,7 +501,7 @@ def render_predictions_section(
     sample_pred = next(iter(display_predictions.values()), None)
     sample_mode = getattr(sample_pred, "logic_mode", "onmark") if sample_pred else "onmark"
     if sample_mode == "dc":
-        # DC 形式 v1.3 純粋ロジック: rating はお父様独自ルール(C/D/E/F)のみで
+        # DC 形式 v1.5 純粋ロジック: rating はお父様独自ルール(C/D/E/F)のみで
         # 計算。TARGET 指数(ZI = col[5])は **参考値** として表示するが
         # rating には含めない。マッチ失敗馬は rate=0 で「評価不能」扱い。
         match_count = race_card_df.attrs.get("dc_match_count", 0)
@@ -491,23 +511,62 @@ def render_predictions_section(
         going = race_card_df.attrs.get("dc_going", "良")
         match_rate = (match_count / total_count * 100) if total_count else 0
         n_failed = total_count - match_count
+
+        # v1.5: 坂路調教 CSV の F4/F5 発火統計
+        f4_fired = sum(
+            1 for p in display_predictions.values()
+            for h in (getattr(p, "horse_ratings", None) or [])
+            for hit in h.matched if hit.rule_id == "F4"
+        )
+        f5_fired = sum(
+            1 for p in display_predictions.values()
+            for h in (getattr(p, "horse_ratings", None) or [])
+            for hit in h.matched if hit.rule_id == "F5"
+        )
+        train_match_count = st.session_state.get("training_match_count", 0)
+        if training_bytes is not None:
+            train_line = (
+                f"\n- 坂路調教 CSV 連携: **{train_match_count} 頭マッチ** / "
+                f"F4 発火 {f4_fired} 頭・F5 発火 {f5_fired} 頭"
+            )
+        else:
+            train_line = (
+                "\n- 坂路調教 CSV: 未アップロード(F4/F5 ルール永続無効)"
+            )
+
         st.success(
-            f"📊 **DC 形式 v1.3 純粋ロジックモードで動作中**\n\n"
-            f"rating はお父様独自ルール(C/D/E/F1/F2/F3)のみで計算。"
+            f"📊 **DC 形式 v1.5 純粋ロジックモードで動作中**\n\n"
+            f"rating はお父様独自ルール(C/D/E/F1/F2/F3 +F4/F5)のみで計算。"
             f"**TARGET 指数(ZI)は参考値として表示するが評価には含めません。**\n\n"
             f"過去走パターンマッチ: **高 {match_high} / 中 {match_med} / 失敗 {n_failed} 頭** "
             f"(全 {total_count} 頭、合計マッチ率 {match_rate:.1f}%)\n"
             f"- 高信頼度(5走以上一致): C/D/E/F1/F2 でフル評価\n"
             f"- 中信頼度(3-4走一致 + 直近 18ヶ月内): 同じくフル評価(やや弱)\n"
             f"- 失敗馬: 過去走照合不能 → **rate = 0(評価不能)** として除外\n"
-            f"- 当日馬場: **{going}**(サイドバー「🏟 当日馬場」で変更可能)\n\n"
+            f"- 当日馬場: **{going}**(サイドバー「🏟 当日馬場」で変更可能)"
+            f"{train_line}\n\n"
             f"※ ◎本命閾値は RA+SE と同じ rating ≥ 100。"
-            f"当日斤量(F3 ルール)・坂路調教(F4/F5)は DC に含まれず永続無効。"
+            f"当日斤量(F3 ルール)は DC に含まれず永続無効。"
         )
     elif sample_mode == "rating":
+        f4_fired = sum(
+            1 for p in display_predictions.values()
+            for h in (getattr(p, "horse_ratings", None) or [])
+            for hit in h.matched if hit.rule_id == "F4"
+        )
+        f5_fired = sum(
+            1 for p in display_predictions.values()
+            for h in (getattr(p, "horse_ratings", None) or [])
+            for hit in h.matched if hit.rule_id == "F5"
+        )
+        train_suffix = ""
+        if training_bytes is not None:
+            tmc = st.session_state.get("training_match_count", 0)
+            train_suffix = f" / 坂路 {tmc} 頭マッチ・F4 {f4_fired}・F5 {f5_fired}"
         st.caption(
-            "ロジック: **本ロジック v1.4 (rating-based + 直近10走評価)** — "
-            "C/D/E/F1/F2/F3 を直近10走で評価し、rating ≥ 100 で ◎本命に確定。"
+            "ロジック: **本ロジック v1.5 (rating-based + 直近10走 + 坂路 F4/F5)** — "
+            f"C/D/E/F1/F2/F3/F4/F5 を直近10走で評価し、rating ≥ 100 で ◎本命に確定。"
+            f"{train_suffix}"
         )
     else:
         st.caption(
@@ -667,7 +726,7 @@ def get_historical(_schema_version: str = HISTORICAL_DATA_SCHEMA_VERSION) -> His
 # =====================================================================
 # メイン領域 上部: タイトル + 出馬表アップロード
 # =====================================================================
-st.title("🏇 競馬予想アプリ(本ロジック v1.4)")
+st.title("🏇 競馬予想アプリ(本ロジック v1.5)")
 st.caption("当日の出馬表 CSV をアップロードして「予想実行」を押してください。")
 
 # 別ページ(ロジック説明 等)に遷移しても CSV を保持するため、
@@ -676,13 +735,34 @@ st.caption("当日の出馬表 CSV をアップロードして「予想実行」
 SS_FILE_BYTES = "uploaded_csv_bytes"
 SS_FILE_NAME = "uploaded_csv_name"
 SS_FILE_HASH = "uploaded_csv_hash"
+# v1.5: 坂路調教 CSV(任意、F4/F5 ルール有効化用)
+SS_TRAINING_BYTES = "uploaded_training_bytes"
+SS_TRAINING_NAME = "uploaded_training_name"
+SS_TRAINING_HASH = "uploaded_training_hash"
 
+st.markdown("### 📁 CSV アップロード")
+
+# ① 必須: 当日出馬表
 uploaded = st.file_uploader(
-    "当日出馬表 CSV をアップロード",
+    "① 当日出馬表 CSV(必須)",
     type=["csv"],
     accept_multiple_files=False,
     key="race_card_uploader",
     help="JV-Link または TARGET frontier JV からエクスポートした CSV を想定。",
+)
+
+# ② 任意: 坂路調教(F4/F5 ルール有効化)
+uploaded_training = st.file_uploader(
+    "② 坂路調教 CSV(任意・F4/F5 ルール有効化)",
+    type=["csv"],
+    accept_multiple_files=False,
+    key="training_uploader",
+    help=(
+        "TARGET frontier JV から出力した坂路調教 CSV を想定(Shift_JIS、18 列)。\n"
+        "アップロードすると「坂路 1F ≤ 11.2 = F4(+30)、1F+2F ≤ 11.2 = F5(+40)」が"
+        "発火可能になる。**未アップロードでも当日出馬表だけで予想は実行可能** "
+        "(F4/F5 のみ永続無効)。"
+    ),
 )
 
 race_card_df: pd.DataFrame | None = None
@@ -690,7 +770,12 @@ source_name: str | None = None
 file_hash: str | None = None
 file_bytes: bytes | None = None
 restored_from_session = False
+# 坂路用
+training_bytes: bytes | None = None
+training_name: str | None = None
+training_restored = False
 
+# ----- ① 当日出馬表 の bytes 確定 + セッション復元 -----
 if uploaded is not None:
     # 新規アップロード(または同一セッション内の再表示) → セッションに保存
     file_bytes = uploaded.getvalue()
@@ -701,26 +786,50 @@ if uploaded is not None:
     st.session_state[SS_FILE_HASH] = file_hash
 elif st.session_state.get(SS_FILE_BYTES) is not None:
     # 別ページから戻ってきた → uploader は空だが session に履歴あるので復元。
-    # アップローダー直下に明示バナーを出す:
-    # 「ロジック説明ページ → 戻る」でアップローダーが視覚的に空に見えるため、
-    # お父様が「再アップロードが必要」と誤認しないようすぐ目につく位置に配置。
     file_bytes = st.session_state[SS_FILE_BYTES]
     file_hash = st.session_state[SS_FILE_HASH]
     source_name = st.session_state[SS_FILE_NAME]
     restored_from_session = True
+
+# ----- ② 坂路調教 の bytes 確定 + セッション復元 -----
+if uploaded_training is not None:
+    training_bytes = uploaded_training.getvalue()
+    training_name = uploaded_training.name
+    st.session_state[SS_TRAINING_BYTES] = training_bytes
+    st.session_state[SS_TRAINING_NAME] = training_name
+    st.session_state[SS_TRAINING_HASH] = hashlib.md5(training_bytes).hexdigest()
+elif st.session_state.get(SS_TRAINING_BYTES) is not None:
+    training_bytes = st.session_state[SS_TRAINING_BYTES]
+    training_name = st.session_state[SS_TRAINING_NAME]
+    training_restored = True
+
+# ----- 復元バナー(両ファイル一括表示 + クリアボタン) -----
+if restored_from_session or training_restored:
     msg_col, btn_col = st.columns([5, 1])
+    lines: list[str] = []
+    if restored_from_session:
+        lines.append(f"- ① 出馬表: **{source_name}**")
+    if training_restored:
+        lines.append(f"- ② 坂路調教: **{training_name}**")
+    elif training_bytes is not None:
+        # 同じ rerun でアップ + 復元両方のケースは training_restored=False
+        lines.append(f"- ② 坂路調教: **{training_name}**")
     msg_col.info(
-        f"📂 アップロード履歴を復元中: **{source_name}**  \n"
-        "ページ切替後もそのまま使えます。別ファイルに切り替えるなら"
+        "📂 **アップロード履歴を復元中**\n\n"
+        + "\n".join(lines)
+        + "\n\nページ切替後もそのまま使えます。別ファイルに切り替えるなら"
         "右の「🗑 クリア」を押してから新しいファイルを選択してください。"
     )
     if btn_col.button(
         "🗑 クリア",
-        help="アップロード履歴と予想結果を消す(新規ファイルの読み込みに切替)",
+        help="アップロード履歴と予想結果を全て消す",
         key="clear_session_top",
     ):
-        for k in (SS_FILE_BYTES, SS_FILE_NAME, SS_FILE_HASH,
-                  "all_predictions", "predictions_for_file"):
+        for k in (
+            SS_FILE_BYTES, SS_FILE_NAME, SS_FILE_HASH,
+            SS_TRAINING_BYTES, SS_TRAINING_NAME, SS_TRAINING_HASH,
+            "all_predictions", "predictions_for_file",
+        ):
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -960,7 +1069,33 @@ if race_card_df is not None and historical is not None:
         if race_card_df.attrs.get("data_format") == "dc":
             today_going = race_card_df.attrs.get("dc_going", "良")
             cache_hash = f"{file_hash}_dc_{today_going}"
-        all_predictions = predict_all_races_cached(cache_hash, race_card_df, historical)
+
+        # v1.5: 坂路調教 CSV があれば事前にパース + マッチして cached に渡す。
+        training_match: dict[str, dict] = {}
+        training_hash_str = ""
+        if training_bytes is not None:
+            try:
+                training_df = parse_training_csv(training_bytes)
+                target_date = ""
+                if not race_card_df.empty:
+                    target_date = str(race_card_df["race_date"].iloc[0])
+                training_match = match_training_to_horses(
+                    training_df, race_card_df, target_date=target_date,
+                )
+                training_hash_str = st.session_state.get(SS_TRAINING_HASH, "")
+            except Exception as e:
+                st.warning(f"坂路調教 CSV の解析でエラー: {e}(F4/F5 評価はスキップ)")
+                training_match = {}
+                training_hash_str = ""
+
+        # 統計を session_state に保存(バナー表示用)
+        st.session_state["training_match_count"] = len(training_match)
+
+        all_predictions = predict_all_races_cached(
+            cache_hash, race_card_df, historical,
+            training_hash=training_hash_str,
+            _training_match=training_match if training_match else None,
+        )
         st.session_state["all_predictions"] = all_predictions
         st.session_state["predictions_for_file"] = cache_hash
         # サイドバーは script の先頭付近で描画されるので、その時点で
