@@ -240,7 +240,19 @@ def _render_section_main_pick(pred: RacePrediction) -> None:
                     st.write(f"- **{hit.rule_id}** (+{hit.rate}): {hit.reason}")
 
     # 注目馬テーブル(本命除く、rating モード: rating 上位、onmark: ○数上位)
+    # v1.5.1: 画面右側の余白を抑えるため st.columns([3, 4]) で左寄せ +
+    # column_config で各列に明示幅(small/medium)。コンテンツに目線が集中する。
     axis_id = j.main_pick or j.sub_pick
+
+    notable_col_config = {
+        "rate": st.column_config.NumberColumn("rate", width="small", format="%d"),
+        "○":   st.column_config.NumberColumn("○",   width="small", format="%d"),
+        "馬番": st.column_config.NumberColumn("馬番", width="small", format="%d"),
+        "馬名": st.column_config.TextColumn("馬名", width="medium"),
+        "脚質": st.column_config.TextColumn("脚質", width="small"),
+        "人気": st.column_config.NumberColumn("人気", width="small", format="%d"),
+    }
+
     if rating_mode:
         sorted_notables = sorted(pred.horse_ratings, key=lambda x: -x.total_rating)
         notables = [h for h in sorted_notables if h.horse_id != axis_id and h.total_rating >= 1][:6]
@@ -251,12 +263,19 @@ def _render_section_main_pick(pred: RacePrediction) -> None:
                     "馬番": h.horse_number,
                     "馬名": h.horse_name,
                     "脚質": h.running_style,
-                    "人気": h.popularity if h.popularity > 0 else "",
+                    "人気": h.popularity if h.popularity > 0 else 0,
                 }
                 for h in notables
             ]
             st.markdown("注目馬(rate ≥ 1):")
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            tbl_col, _ = st.columns([3, 4])
+            with tbl_col:
+                st.dataframe(
+                    pd.DataFrame(rows),
+                    hide_index=True,
+                    column_config=notable_col_config,
+                    use_container_width=True,
+                )
     else:
         notables = [
             h for h in sorted(pred.horses, key=lambda x: -x.marks_count)
@@ -269,12 +288,19 @@ def _render_section_main_pick(pred: RacePrediction) -> None:
                     "馬番": h.horse_number,
                     "馬名": h.horse_name,
                     "脚質": h.running_style,
-                    "人気": h.popularity if h.popularity > 0 else "",
+                    "人気": h.popularity if h.popularity > 0 else 0,
                 }
                 for h in notables
             ]
             st.markdown("注目馬(○ ≥ 1):")
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            tbl_col, _ = st.columns([3, 4])
+            with tbl_col:
+                st.dataframe(
+                    pd.DataFrame(rows),
+                    hide_index=True,
+                    column_config=notable_col_config,
+                    use_container_width=True,
+                )
 
 
 def _render_section_wide(pred: RacePrediction) -> None:
@@ -306,7 +332,12 @@ def _render_section_demerit(pred: RacePrediction) -> None:
 
 
 def _render_section_betting(pred: RacePrediction) -> None:
-    """セクション 4: 推奨買い目"""
+    """セクション 4: 推奨買い目
+
+    v1.5.1: 画面右側の余白を抑えるため st.columns([4, 3]) で左寄せ +
+    column_config で各列に明示幅。馬名(複数頭の場合「/」区切りで長くなる)と
+    備考(「軸 — ワイド候補トップ 1点」等)は medium 幅で確保。
+    """
     st.markdown("**💴 推奨買い目**")
     bp = pred.betting
     if not bp.tickets:
@@ -322,7 +353,20 @@ def _render_section_betting(pred: RacePrediction) -> None:
         }
         for t in bp.tickets
     ]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    bet_col_config = {
+        "券種": st.column_config.TextColumn("券種", width="small"),
+        "馬番": st.column_config.TextColumn("馬番", width="small"),
+        "馬名": st.column_config.TextColumn("馬名", width="medium"),
+        "備考": st.column_config.TextColumn("備考", width="medium"),
+    }
+    tbl_col, _ = st.columns([4, 3])
+    with tbl_col:
+        st.dataframe(
+            pd.DataFrame(rows),
+            hide_index=True,
+            column_config=bet_col_config,
+            use_container_width=True,
+        )
 
 
 def _render_section_all_marks(pred: RacePrediction) -> None:
