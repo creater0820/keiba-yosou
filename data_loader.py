@@ -320,11 +320,24 @@ def enrich_dc_with_historical(
     new_horse_names: list[str] = []
     new_jockeys: list[str] = []
     matched_hist_ids: list[str | None] = []
+    confidences: list[str] = []        # "high" / "medium" / "none"
+    past_run_counts: list[int] = []    # 元 DC の有効過去走数(失敗馬の表示分岐用)
     new_past_runs_by_horse: dict[str, list[dict | None]] = {}
+
+    def _count_valid_dc_runs(runs: list[dict | None]) -> int:
+        """DC 元データの有効過去走数(distance > 0 のもの)。"""
+        return sum(
+            1 for r in runs
+            if isinstance(r, dict) and (r.get("distance") or 0) > 0
+        )
 
     for _, row in df.iterrows():
         dc_hid = str(row["horse_id"])
         result = matches.get(dc_hid)
+        confidence = result.confidence if result else "none"
+        n_dc_runs = _count_valid_dc_runs(dc_past_runs.get(dc_hid, []))
+        past_run_counts.append(n_dc_runs)
+        confidences.append(confidence)
         if result and result.matched_horse_id and result.matched_horse_id in latest_per_horse.index:
             hist_hid = result.matched_horse_id
             latest = latest_per_horse.loc[hist_hid]
@@ -355,21 +368,38 @@ def enrich_dc_with_historical(
                 runs5.append(None)
             new_past_runs_by_horse[dc_hid] = runs5
         else:
-            # マッチ失敗 → 元の DC 過去走をそのまま使い、馬名・騎手は据置
-            new_horse_names.append(str(row["horse_name"]))
-            new_jockeys.append("(不明)")
+            # マッチ失敗 → 馬名にラベル付与してお父様に状態を明示
+            #  past_run_count == 0      : 「(新馬)」
+            #  past_run_count <= 2      : 「(過去走少)」
+            #  それ以外失敗(中信頼度未達等): 「(DB照合不能)」
+            if n_dc_runs == 0:
+                label = "(新馬)"
+            elif n_dc_runs <= 2:
+                label = "(過去走少)"
+            else:
+                label = "(DB照合不能)"
+            try:
+                hno = int(row["horse_number"])
+            except (ValueError, TypeError):
+                hno = 0
+            new_horse_names.append(f"馬番{hno}{label}")
+            new_jockeys.append("(当日確認)")
             matched_hist_ids.append(None)
             new_past_runs_by_horse[dc_hid] = dc_past_runs.get(dc_hid, [None] * 5)
 
     df["horse_name"] = new_horse_names
     df["jockey"] = new_jockeys
     df["matched_historical_horse_id"] = matched_hist_ids
+    df["match_confidence"] = confidences
+    df["dc_past_run_count"] = past_run_counts
     # 当日馬場を全行に設定(rating engine が going を読む)
     df["going"] = today_going
 
-    # attrs を更新
+    # attrs を更新(信頼度別カウントも保持)
     df.attrs["dc_past_runs"] = new_past_runs_by_horse
     df.attrs["dc_match_count"] = sum(1 for h in matched_hist_ids if h)
+    df.attrs["dc_match_count_high"] = sum(1 for c in confidences if c == "high")
+    df.attrs["dc_match_count_medium"] = sum(1 for c in confidences if c == "medium")
     df.attrs["dc_total_count"] = len(matched_hist_ids)
     df.attrs["dc_going"] = today_going
     return df

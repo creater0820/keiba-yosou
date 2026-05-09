@@ -29,7 +29,9 @@ from dataclasses import dataclass
 import pandas as pd
 
 
-MIN_VOTES = 5            # 5 過去走以上で同一 horse_id にヒットした場合のみ採用
+MIN_VOTES_HIGH = 5       # 5 過去走以上で同一 horse_id にヒット = 高信頼度
+MIN_VOTES_MEDIUM = 3     # 3-4 走一致 = 中信頼度(候補が単独 + 直近 race_date 18ヶ月以内)
+MEDIUM_RECENT_MONTHS = 18  # 中信頼度の偽陽性予防: candidate の最新 race_date がこの期間内
 DATE_TOLERANCE_DAYS = 3  # historical race_date との許容差(日)
 
 
@@ -39,6 +41,7 @@ class HorseMatchResult:
     n_valid_runs: int    # DC 側で日付+距離 が valid な過去走数
     n_votes: int         # 最有力 horse_id の票数
     candidates: int      # 票がある horse_id の総数(参考)
+    confidence: str = "none"  # "high"(5+) / "medium"(3-4 + 単独 + 最新走 18ヶ月内) / "none"
 
 
 def _build_historical_index(
@@ -76,21 +79,24 @@ def match_dc_horse(
     dc_past_runs: list[dict | None],
     hist_indexed: pd.DataFrame,
     *,
-    min_votes: int = MIN_VOTES,
+    target_date_iso: str | None = None,
     tolerance_days: int = DATE_TOLERANCE_DAYS,
 ) -> HorseMatchResult:
     """
     DC の 1 馬分の過去走から historical 上の horse_id を推定する。
 
+    信頼度:
+      - **high**: 5 票以上一致 + 単独最高票
+      - **medium**: 3-4 票一致 + 単独最高票 + 候補の最新 race_date が
+                   target_date から 18 ヶ月以内(休養長馬の偽陽性予防)
+      - **none**: 上記いずれにも該当せず(マッチ失敗)
+
     引数:
         dc_past_runs: parse_dc_dataframe の戻り値の各馬分。
                       各 dict は race_date(推定 ISO 文字列)と distance を持つ。
         hist_indexed: _build_historical_index で前処理済みの DataFrame。
-        min_votes: 採用基準となる最低票数(spec の 5 走以上一致)。
-
-    戻り値: HorseMatchResult
+        target_date_iso: 当日レース日(医薬の medium 信頼度判定用)。
     """
-    # 各 past_run の候補 horse_id 集合を構築
     valid_runs = 0
     votes: Counter[str] = Counter()
     for r in dc_past_runs:
@@ -113,26 +119,37 @@ def match_dc_horse(
         for hid in candidates:
             votes[hid] += 1
 
-    if valid_runs < min_votes:
-        # そもそも有効な過去走が少なすぎる(初出走馬・地方デビュー馬等)
-        top_hid, top_n = votes.most_common(1)[0] if votes else (None, 0)
-        return HorseMatchResult(None, valid_runs, top_n, len(votes))
-
     if not votes:
-        return HorseMatchResult(None, valid_runs, 0, 0)
+        return HorseMatchResult(None, valid_runs, 0, 0, "none")
 
     top_hid, top_n = votes.most_common(1)[0]
-    if top_n < min_votes:
-        return HorseMatchResult(None, valid_runs, top_n, len(votes))
+    n_top_tied = sum(1 for _, n in votes.items() if n == top_n)
 
-    # 同票候補(ノイズ排除のため最高票数 horse_id が複数いる場合は不採用)
-    n_top = sum(1 for _, n in votes.items() if n == top_n)
-    if n_top > 1:
-        # tie-break は補正タイムでの厳密一致(adjusted_time)を見るが、
-        # historical 側に同等指標がないため現状は ambiguous として不採用
-        return HorseMatchResult(None, valid_runs, top_n, len(votes))
+    # 高信頼度: 5 票以上 + 単独最高票
+    if top_n >= MIN_VOTES_HIGH and n_top_tied == 1:
+        return HorseMatchResult(top_hid, valid_runs, top_n, len(votes), "high")
 
-    return HorseMatchResult(top_hid, valid_runs, top_n, len(votes))
+    # 中信頼度: 3-4 票一致 + 単独 + 最新走が直近 18 ヶ月以内
+    if MIN_VOTES_MEDIUM <= top_n < MIN_VOTES_HIGH and n_top_tied == 1:
+        if target_date_iso is not None:
+            try:
+                target_dt = pd.Timestamp(target_date_iso)
+                # 候補馬の最新走 race_date を確認
+                candidate_runs = hist_indexed[hist_indexed["horse_id"] == top_hid]
+                if not candidate_runs.empty:
+                    latest = candidate_runs["race_date_dt"].max()
+                    cutoff = target_dt - pd.DateOffset(months=MEDIUM_RECENT_MONTHS)
+                    if latest >= cutoff:
+                        return HorseMatchResult(
+                            top_hid, valid_runs, top_n, len(votes), "medium",
+                        )
+            except (ValueError, TypeError):
+                pass
+        # target_date 未指定の場合は安全側で medium 不採用
+        return HorseMatchResult(None, valid_runs, top_n, len(votes), "none")
+
+    # 同票複数 / 票数不足 → 失敗
+    return HorseMatchResult(None, valid_runs, top_n, len(votes), "none")
 
 
 def match_all_dc_horses(
@@ -149,5 +166,7 @@ def match_all_dc_horses(
     out: dict[str, HorseMatchResult] = {}
     for hid_dc in dc_horse_ids:
         runs = dc_past_runs_by_horse.get(hid_dc, [])
-        out[hid_dc] = match_dc_horse(runs, hist_indexed)
+        out[hid_dc] = match_dc_horse(
+            runs, hist_indexed, target_date_iso=target_date_iso,
+        )
     return out

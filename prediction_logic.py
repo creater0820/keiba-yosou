@@ -428,6 +428,8 @@ def predict_race_dc(
                 last_finishing_position=rule_obj.last_finishing_position,
                 today_carry_weight=rule_obj.today_carry_weight,
                 rule24_active=rule_obj.rule24_active,
+                evaluated_rule_ids=rule_obj.evaluated_rule_ids,
+                missed_rule_ids=rule_obj.missed_rule_ids,
             )
         else:
             # 簡易モード: TARGET 指数を rating として採用
