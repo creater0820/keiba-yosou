@@ -1057,6 +1057,88 @@ with st.sidebar:
         else:
             st.caption("該当馬なし(rating 100 以上の馬がいません)")
 
+        # ================================================================
+        # 🔥 坂路で超エリート級の上がり ─ F4/F5 発火馬のハイライト
+        # ================================================================
+        # F4(1F ≤ 11.2、+30)/ F5(1F+2F ≤ 11.2、+40)は超エリート級発火条件で
+        # 1 日 0〜数頭しか出ない希少イベント。発火時は「激走・大穴の前兆」
+        # として、お父様が瞬時に把握できるよう専用セクションで強調する。
+        # F4 と F5 が同じ馬で同時発火することはない(F5 排他で +40 のみ採用)。
+        st.divider()
+        st.subheader("🔥 坂路で超エリート級の上がり")
+        st.caption(
+            "坂路調教で 1F または 1F+2F が 11.2 秒以下の超エリート級。"
+            "激走・大穴の前兆。"
+        )
+
+        elite_horses: list[dict] = []
+        for _rid, _pred in _session_preds.items():
+            ratings = getattr(_pred, "horse_ratings", None) or []
+            if not ratings:
+                continue
+            _meta = _pred.race_meta
+            _course = _meta.get("racecourse", "")
+            if selected_course != "全場" and _course != selected_course:
+                continue
+            for _h in ratings:
+                # F5 が発火していれば F5 採用、無ければ F4(F4/F5 排他)
+                f5_hit = next((m for m in _h.matched if m.rule_id == "F5"), None)
+                f4_hit = next((m for m in _h.matched if m.rule_id == "F4"), None)
+                hit = f5_hit or f4_hit
+                if not hit:
+                    continue
+                _jockey = _jockey_by_hid.get(_h.horse_id, "") or "(当日確認)"
+                if not _jockey.strip():
+                    _jockey = "(当日確認)"
+                elite_horses.append({
+                    "course": _course,
+                    "race_number": int(_meta.get("race_number") or 0),
+                    "post_time": _meta.get("post_time", ""),
+                    "horse_number": _h.horse_number,
+                    "horse_name": _h.horse_name,
+                    "jockey": _jockey,
+                    "rule_id": hit.rule_id,
+                    "reason": hit.reason or "",
+                })
+
+        # 並び順: post_time 昇順 → 場 → R 番昇順(レース順に並ぶ)
+        elite_horses.sort(key=lambda x: (
+            x["post_time"] or "99:99", x["course"], x["race_number"],
+        ))
+
+        # 坂路 CSV のアップロード状況で表示分岐
+        _training_uploaded = st.session_state.get("uploaded_training_bytes") is not None
+
+        if not _training_uploaded:
+            st.caption(
+                "坂路調教 CSV 未アップロードのため評価不可。"
+                "メイン画面の「② 坂路調教 CSV」からアップロードしてください。"
+            )
+        elif not elite_horses:
+            st.caption("該当馬なし(本日 F4/F5 発火 0 頭)")
+        else:
+            def _render_elite(h: dict) -> None:
+                emoji = "💥" if h["rule_id"] == "F5" else "🔥"
+                line1 = (
+                    f"**{emoji} {h['course']}{h['race_number']}R** "
+                    f"{h['horse_number']} {h['horse_name']}({h['jockey']})"
+                )
+                line2 = f"&nbsp;&nbsp;{h['rule_id']}: {h['reason']}"
+                st.markdown(line1)
+                st.caption(line2)
+
+            # 4 頭以上は折りたたみ(縦の専有を抑える)、3 頭以下は直に展開
+            if len(elite_horses) >= 4:
+                with st.expander(
+                    f"🔥 坂路エリート {len(elite_horses)} 頭",
+                    expanded=False,
+                ):
+                    for _h in elite_horses:
+                        _render_elite(_h)
+            else:
+                for _h in elite_horses:
+                    _render_elite(_h)
+
     st.divider()
     st.subheader("📊 過去データ")
     # historical はサイドバー描画より前に load 済み。ここでは表示のみ。
