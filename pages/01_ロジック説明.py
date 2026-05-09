@@ -91,15 +91,29 @@ def _predict_test_data(mode: str) -> dict[str, RacePrediction]:
 def _get_predictions(mode: str) -> tuple[dict[str, RacePrediction], str]:
     """予想結果と「データ出所」のラベルを返す。
 
-    セッションの予想結果は app.py で計算されたモード固定なので、
-    ここで requested mode と一致しない場合はテストデータから再計算する。
+    セッションの予想結果は app.py で計算されたモード固定。
+    ここで requested mode と互換でなければテストデータから再計算する。
+
+    モード互換マップ:
+      - logic_mode == "rating"  : "rating" トグルでのみ採用
+      - logic_mode == "onmark"  : "onmark" トグルでのみ採用
+      - logic_mode == "dc"      : 内部で rating ロジック(C/D/E/F)を使うため
+                                  "rating" トグルで採用(主用途のお父様の DC で
+                                  実 CSV がロジック説明に反映されないバグの修正)
     """
     in_session = st.session_state.get("all_predictions")
     if in_session:
         sample = next(iter(in_session.values()), None)
         sess_mode = getattr(sample, "logic_mode", "onmark") if sample else "onmark"
-        if sess_mode == mode:
-            return in_session, f"セッション中の予想結果({mode} モード)"
+
+        # DC 形式は rating ロジックの上位適用なので "rating" トグルと互換
+        compatible = (
+            sess_mode == mode
+            or (sess_mode == "dc" and mode == "rating")
+        )
+        if compatible:
+            label_extra = "(DC 形式)" if sess_mode == "dc" else ""
+            return in_session, f"セッション中の予想結果({mode} モード){label_extra}"
 
     if TEST_RACE_CARD_PATH.exists():
         try:
