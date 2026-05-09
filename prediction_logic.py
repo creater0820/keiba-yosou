@@ -113,9 +113,10 @@ def _build_horse_mark_data(
     field_size = len(race_card_df)
     horse_ids = race_card_df["horse_id"].astype(str).tolist()
 
-    # 直近5走を一括キャッシュ取得
+    # 直近10走を一括キャッシュ取得(v1.4: 5→10 に拡張)
+    # 脚質判定は内部で head5 に絞るので、10 走入力でも安全。
     history = get_recent_runs_for_race(
-        tuple(horse_ids), target_date, historical_df, n=5,
+        tuple(horse_ids), target_date, historical_df, n=10,
     )
     # 前走着順 (rule_4 用)
     last_pos = get_last_finishing_positions(horse_ids, target_date, historical_df)
@@ -259,10 +260,10 @@ def predict_race_v2(
     # 1) 馬基本情報(○マークなしで構築) — 後段の rating 計算で属性のみ使う
     horses_v1 = _build_horse_mark_data(race_card_df, hist_df, target_date)
 
-    # 2) 直近5走を取得(rating engine への入力)
+    # 2) 直近10走を取得(rating engine への入力、v1.4: 5→10 に拡張)
     horse_ids = [h.horse_id for h in horses_v1]
     history = get_recent_runs_for_race(
-        tuple(horse_ids), target_date, hist_df, n=5,
+        tuple(horse_ids), target_date, hist_df, n=10,
     )
 
     # 3) 当日斤量(race_card_df の carry_weight 列から取得)
@@ -278,7 +279,7 @@ def predict_race_v2(
     # 4) 各馬の rating を計算
     horse_ratings: list[HorseRating] = []
     for h in horses_v1:
-        runs = history.get(h.horse_id, [None] * 5)
+        runs = history.get(h.horse_id, [None] * 10)
         rating = compute_horse_rating(
             horse_id=h.horse_id,
             horse_name=h.horse_name,
@@ -388,7 +389,7 @@ def predict_race_dc(
         except ValueError:
             frame = 0
 
-        runs = past_runs_by_horse.get(hid, [None] * 5)
+        runs = past_runs_by_horse.get(hid, [None] * 10)
         # フルモード判定: matched_historical_horse_id 列があり、かつ
         # past_runs に last_3f / corner_1 がある(historical 由来)なら full
         matched_hist_id = row.get("matched_historical_horse_id") if "matched_historical_horse_id" in horses_df.columns else None
@@ -492,7 +493,7 @@ def predict_race_dc(
         horse_ratings=horse_ratings,
     )
     pred.race_meta["dc_past_runs"] = {
-        h.horse_id: past_runs_by_horse.get(h.horse_id, [None] * 5)
+        h.horse_id: past_runs_by_horse.get(h.horse_id, [None] * 10)
         for h in horses_v1
     }
     pred.race_meta["dc_full_mode_count"] = full_mode_count

@@ -293,17 +293,18 @@ def detect_rule_24_situation(past_runs: list[dict | None]) -> bool:
 
 def collect_onmarks(past_runs: list[dict | None]) -> tuple[int, list[str]]:
     """
-    馬 1 頭の直近 5 走を入力に、Step 1 ルール群で ○ マーク数を集計する。
+    馬 1 頭の直近 10 走を入力に、Step 1 ルール群で ○ マーク数を集計する。
 
     引数:
         past_runs: get_recent_n_runs() の戻り値想定。
-                   [前走, 2走前, 3走前, 4走前, 5走前] の順、不足は None。
+                   [前走, 2走前, ..., 10走前] の順、不足は None。
+                   v1.4 で 5 → 10 走に拡張(ベテラン馬の長期実績を拾う)。
 
     戻り値:
         (○マーク数, 該当ルールの理由文字列リスト)
 
     評価対象の選択(ルール 24 が決定):
-        - 通常: 直近5走を全て評価(各ルールは 1走で1回までしか該当しない仕組みなので、
+        - 通常: 直近10走を全て評価(各ルールは 1走で1回までしか該当しない仕組みなので、
           芝/ダ・距離区分・良/重 が異なる過去走で別ルールが該当することで○が累積する)
         - ルール 24 発動時: 前走を除外して 2走前 + 3走前 のみ評価(spec の救済仕様)
     """
@@ -312,15 +313,15 @@ def collect_onmarks(past_runs: list[dict | None]) -> tuple[int, list[str]]:
 
     rule24_active = detect_rule_24_situation(past_runs)
     if rule24_active:
-        # 救済: 2走前 と 3走前 のみを評価対象にする(前走+4,5走前は除外)
+        # 救済: 2走前 と 3走前 のみを評価対象にする(spec 通り、10走化でも変更なし)
         targets = [
             past_runs[i]
             for i in (1, 2)
             if i < len(past_runs) and past_runs[i] is not None
         ]
     else:
-        # 通常: 直近5走を全て評価
-        targets = [r for r in past_runs[:5] if r is not None]
+        # 通常: 直近10走を全て評価
+        targets = [r for r in past_runs[:10] if r is not None]
 
     if not targets:
         # ルール 24 発動も評価対象なし、通常も前走なし → ○ 0 個

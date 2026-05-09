@@ -413,12 +413,31 @@ def _render_section_all_marks(pred: RacePrediction) -> None:
                     st.write(head + "  — 該当ルールなし")
 
 
+def _race_name_part(race_name: str | None) -> str:
+    """expander / サイドバー等のタイトル用に race_name を整形する。
+
+    DC 形式や旧 CSV ではレース名が空 / "(レース名不明)" 等になる。
+    その場合は表記ゆれを出さずに完全に省略する。レース名が取れていれば
+    " レース名" 形式(先頭スペース付き)で返す。
+    """
+    if not race_name:
+        return ""
+    s = str(race_name).strip()
+    if not s or "不明" in s:
+        return ""
+    return f" {s}"
+
+
 def _expander_title(pred: RacePrediction) -> str:
-    """expander タイトル: 場 + R + レース名 + 距離 + 芝/ダ + 発走時刻 + ◎/準◎ + ○数"""
+    """expander タイトル: 場 + R + (レース名) + 距離 + 芝/ダ + 発走時刻 + ◎/準◎ + ○数
+
+    v1.4: race_name が空 or "不明" を含む場合は省略(DC 形式の "(レース名不明)" 対策)。
+    """
     m = pred.race_meta
     base = (
-        f"【{m.get('racecourse','')} {m.get('race_number','')}R】 "
-        f"{m.get('race_name','')} {m.get('distance','')}m {m.get('surface','')}"
+        f"【{m.get('racecourse','')} {m.get('race_number','')}R】"
+        f"{_race_name_part(m.get('race_name'))} "
+        f"{m.get('distance','')}m {m.get('surface','')}"
     )
     pt = m.get("post_time", "")
     if pt:
@@ -507,9 +526,19 @@ def render_predictions_section(
     )
 
     # ----- CSV ダウンロード(本命+ワイド+減点 を行展開) -----
+    def _clean_race_name(name) -> str:
+        """CSV 出力時、'(レース名不明)' 等を空文字に揃える(v1.4)。"""
+        if not name:
+            return ""
+        s = str(name).strip()
+        if "不明" in s:
+            return ""
+        return s
+
     download_rows: list[dict] = []
     for race_id, p in display_predictions.items():
         m = p.race_meta
+        race_name_clean = _clean_race_name(m.get("race_name"))
         # 軸馬
         axis_id = p.judgment.main_pick or p.judgment.sub_pick
         axis = next((h for h in p.horses if h.horse_id == axis_id), None) if axis_id else None
@@ -517,7 +546,7 @@ def render_predictions_section(
             "race_id": race_id,
             "racecourse": m.get("racecourse", ""),
             "race_number": m.get("race_number", ""),
-            "race_name": m.get("race_name", ""),
+            "race_name": race_name_clean,
             "区分": "◎" if p.judgment.main_pick else ("準◎" if p.judgment.sub_pick else "(なし)"),
             "馬番": axis.horse_number if axis else "",
             "馬名": axis.horse_name if axis else "",
@@ -530,7 +559,7 @@ def render_predictions_section(
                 "race_id": race_id,
                 "racecourse": m.get("racecourse", ""),
                 "race_number": m.get("race_number", ""),
-                "race_name": m.get("race_name", ""),
+                "race_name": race_name_clean,
                 "区分": f"WC{i}",
                 "馬番": w.horse_number,
                 "馬名": w.horse_name,
@@ -543,7 +572,7 @@ def render_predictions_section(
                 "race_id": race_id,
                 "racecourse": m.get("racecourse", ""),
                 "race_number": m.get("race_number", ""),
-                "race_name": m.get("race_name", ""),
+                "race_name": race_name_clean,
                 "区分": f"危険({d.rule_id})",
                 "馬番": d.horse_number,
                 "馬名": d.horse_name,

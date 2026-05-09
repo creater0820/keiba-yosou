@@ -167,11 +167,23 @@ def _render_left_column(categories: tuple[LogicCategory, ...]) -> None:
     _render_rule_card(RUNNING_STYLE_SPEC)
 
 
+def _race_name_or_empty(name: str | None) -> str:
+    """v1.4: race_name が空 / "(レース名不明)" 等なら空文字を返す。"""
+    if not name:
+        return ""
+    s = str(name).strip()
+    if not s or "不明" in s:
+        return ""
+    return s
+
+
 def _format_application_line(app: RuleApplication, *, show_race: bool = True) -> str:
     """RuleApplication 1件を 1 行マークダウンに整形。"""
     head = f"馬番{app.horse_number} **{app.horse_name}**"
     if show_race:
-        head += f"  〔{app.racecourse}{app.race_number}R {app.race_name}〕"
+        rn = _race_name_or_empty(app.race_name)
+        suffix = f" {rn}" if rn else ""
+        head += f"  〔{app.racecourse}{app.race_number}R{suffix}〕"
     return f"- {head}\n    - {app.detail}"
 
 
@@ -193,10 +205,11 @@ def _render_examples_for_race(
         rule_index = {}
         for app in collect_applications_for_race(pred):
             rule_index.setdefault(app.rule_id, []).append(app)
+        rn = _race_name_or_empty(pred.race_meta.get("race_name"))
+        rn_part = f" {rn}" if rn else ""
         scope_label = (
             f"{pred.race_meta.get('racecourse','')} "
-            f"{pred.race_meta.get('race_number','')}R "
-            f"{pred.race_meta.get('race_name','')}"
+            f"{pred.race_meta.get('race_number','')}R{rn_part}"
         )
         st.caption(f"対象: **{scope_label}**(レース限定表示)")
         show_race = False  # レース固定なので馬名行に場・R を出さない
@@ -349,9 +362,11 @@ race_options = ["(全レース横断)"]
 race_label_to_id: dict[str, str] = {}
 for rid, p in predictions.items():
     m = p.race_meta
+    rn = _race_name_or_empty(m.get("race_name"))
+    rn_part = f" {rn}" if rn else ""
     label = (
-        f"{m.get('racecourse','')} {m.get('race_number','')}R "
-        f"{m.get('race_name','')}"
+        f"{m.get('racecourse','')} {m.get('race_number','')}R"
+        f"{rn_part}"
         f"  〔{m.get('distance','')}m {m.get('surface','')} / {m.get('going','')}〕"
     )
     race_options.append(label)
@@ -420,10 +435,11 @@ else:
             ratings_sorted = sorted(
                 pred.horse_ratings, key=lambda r: -r.total_rating,
             )
+            rn = _race_name_or_empty(pred.race_meta.get("race_name"))
+            rn_part = f" {rn}" if rn else ""
             scope_label = (
                 f"{pred.race_meta.get('racecourse','')} "
-                f"{pred.race_meta.get('race_number','')}R "
-                f"{pred.race_meta.get('race_name','')}"
+                f"{pred.race_meta.get('race_number','')}R{rn_part}"
             )
             st.caption(f"対象: **{scope_label}**(レース限定表示)")
 
