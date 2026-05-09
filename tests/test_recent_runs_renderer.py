@@ -383,6 +383,47 @@ def test_jockey_changed_skipped_when_no_prev_run():
 
 
 # ==================================================================
+# Matrix HTML cache のリグレッション(perf 修正で payload tuple 化したら
+# 消費側の attribute access が落ちた事故の再発防止)
+# ==================================================================
+def test_build_matrix_html_accepts_dataclass_predictions():
+    """HorsePrediction(dataclass)のリストを直接渡しても AttributeError が
+    出ず、HTML が文字列で返ること。直前の perf 修正で payload tuple 化して
+    いた時に `p.horse_id` の attribute access が落ちた事故の再発防止。"""
+    import pandas as pd
+    from prediction_logic import HorsePrediction
+    from utils.recent_runs_renderer import _build_matrix_html
+
+    rc = pd.DataFrame({
+        "horse_id": ["H1", "H2"],
+        "horse_name": ["馬A", "馬B"],
+        "horse_number": [1, 2],
+        "race_date": ["2026-05-09", "2026-05-09"],
+        "surface": ["芝", "芝"],
+        "distance": [1400, 1400],
+        "jockey": ["武豊", "横山典弘"],
+    })
+    rc.attrs["dc_past_runs"] = {"H1": [None] * 5, "H2": [None] * 5}
+    preds = [
+        HorsePrediction(
+            horse_id="H1", horse_name="馬A", jockey="武豊",
+            score=5.0, mark="◎", reasons=[],
+        ),
+        HorsePrediction(
+            horse_id="H2", horse_name="馬B", jockey="横山典弘",
+            score=2.0, mark="", reasons=[],
+        ),
+    ]
+    historical = pd.DataFrame()  # 過去走は dc_past_runs 経由なので空でも OK
+
+    html = _build_matrix_html(rc, preds, historical)
+    # 落ちずに文字列を返し、馬名が含まれていること
+    assert isinstance(html, str)
+    assert "馬A" in html
+    assert "馬B" in html
+
+
+# ==================================================================
 # 単体実行用ランナー(他テストと同じパターン)
 # ==================================================================
 def _all_tests():
