@@ -322,12 +322,13 @@ def _render_section_betting(pred: RacePrediction) -> None:
 
 
 def _render_section_all_marks(pred: RacePrediction) -> None:
-    """セクション 6: 全頭の rating / ○マーク詳細"""
+    """セクション 6: 全頭の rating / ○マーク詳細(評価試行ログ込み)"""
     rating_mode = _is_rating_mode(pred)
     section_title = "全頭の rating 詳細" if rating_mode else "全頭の○マーク詳細"
 
     with st.expander(section_title, expanded=False):
         if rating_mode:
+            is_dc = getattr(pred, "logic_mode", "") == "dc"
             for r in sorted(pred.horse_ratings,
                              key=lambda x: (-x.total_rating, x.horse_number)):
                 mark_label = ""
@@ -340,14 +341,50 @@ def _render_section_all_marks(pred: RacePrediction) -> None:
                     f"{mark_label}馬番{r.horse_number} {r.horse_name} "
                     f"({r.running_style} / {pop_str}) rate {r.total_rating}"
                 )
-                if r.matched:
-                    with st.expander(head, expanded=False):
-                        for hit in r.matched:
-                            st.write(f"- **{hit.rule_id}** (+{hit.rate}): {hit.reason}")
+                with st.expander(head, expanded=False):
+                    # ----- DC モード: rate 内訳を「基本 + ルール加算」分解で透明化 -----
+                    if is_dc:
+                        # ルール加算合計(matched の rate 合計)
+                        rule_bonus = sum(hit.rate for hit in r.matched)
+                        baseline = r.total_rating - rule_bonus
+                        is_matched = not r.horse_name.startswith("馬番")
+                        st.markdown("**内訳:**")
+                        st.write(f"- 基本(TARGET 指数): **+{baseline}**")
+                        st.write(f"- ルール加算合計: **+{rule_bonus}**")
+                        if r.matched:
+                            st.markdown("**発火ルール:**")
+                            for hit in r.matched:
+                                st.write(
+                                    f"- **{hit.rule_id}** (+{hit.rate}): {hit.reason}"
+                                )
+                        # 評価試行ログ:発火しなかったが評価対象になったルール
+                        if r.missed_rule_ids:
+                            st.markdown("**評価試行(該当走なし):**")
+                            st.caption(
+                                f"{', '.join(r.missed_rule_ids)} — surface・距離区分は"
+                                "一致したが、上3F や 通過順位改善 等の付帯条件を"
+                                "満たす過去走がなかった。"
+                            )
+                        elif not r.matched and not is_matched:
+                            st.caption("過去走 DB 照合できなかったため "
+                                       "C/D/E ルール評価をスキップ "
+                                       "(rate は TARGET 指数のみ)。")
+                        elif not r.matched and is_matched:
+                            st.caption("過去走と今回レースの surface・距離区分が"
+                                       "全て不一致のため C/D/E 評価対象なし。")
                         if r.rule24_active:
                             st.caption("📌 F2 救済発動(2,3走前で評価)")
-                else:
-                    st.write(head + "  — 該当ルールなし")
+                    # ----- rating(RA+SE)モード: 既存表記そのまま -----
+                    else:
+                        if r.matched:
+                            for hit in r.matched:
+                                st.write(
+                                    f"- **{hit.rule_id}** (+{hit.rate}): {hit.reason}"
+                                )
+                            if r.rule24_active:
+                                st.caption("📌 F2 救済発動(2,3走前で評価)")
+                        else:
+                            st.caption("該当ルールなし")
         else:
             for h in sorted(pred.horses, key=lambda x: (-x.marks_count, x.horse_number)):
                 mark_label = ""
@@ -420,15 +457,19 @@ def render_predictions_section(
         # 本ロジック v1.1 のフルモード(C/D/E/F1/F2/F3)で評価される。
         # マッチ失敗馬は DC 簡易モード(TARGET 指数 単独)で fallback。
         match_count = race_card_df.attrs.get("dc_match_count", 0)
+        match_high = race_card_df.attrs.get("dc_match_count_high", 0)
+        match_med = race_card_df.attrs.get("dc_match_count_medium", 0)
         total_count = race_card_df.attrs.get("dc_total_count", 0)
         going = race_card_df.attrs.get("dc_going", "良")
         match_rate = (match_count / total_count * 100) if total_count else 0
+        n_failed = total_count - match_count
         st.success(
             f"📊 **DC 形式 v1.2 ハイブリッドモードで動作中**\n\n"
-            f"過去走パターンマッチで **{match_count} / {total_count} 頭"
-            f"({match_rate:.1f}%)** を historical/races.parquet に紐付けました。\n"
-            f"- マッチ成功馬: 本ロジック v1.1 の C/D/E/F1/F2 ルールでフル評価\n"
-            f"- マッチ失敗馬: TARGET 指数 (col[5]) 直接採用の簡易モード\n"
+            f"過去走パターンマッチ: **高 {match_high} / 中 {match_med} / 失敗 {n_failed} 頭** "
+            f"(全 {total_count} 頭、合計マッチ率 {match_rate:.1f}%)\n"
+            f"- 高信頼度(5走以上一致): C/D/E/F1/F2 でフル評価\n"
+            f"- 中信頼度(3-4走一致 + 直近 18ヶ月内): 同じくフル評価(やや弱)\n"
+            f"- 失敗馬: TARGET 指数(col[5])直接採用の簡易モード\n"
             f"- 当日馬場: **{going}**(サイドバー「🏟 当日馬場」で変更可能)\n\n"
             f"※ 当日斤量(F3 ルール)・坂路調教(F4/F5)は DC に含まれず永続無効。"
         )

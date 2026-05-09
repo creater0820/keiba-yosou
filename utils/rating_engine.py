@@ -69,6 +69,11 @@ class HorseRating:
     last_finishing_position: int | None = None
     today_carry_weight: float | None = None
     rule24_active: bool = False  # F2 救済が走ったか
+    # ルール評価の透明化(UI で「該当ルールなし」固定表示を避けるため)
+    # evaluated_rule_ids: surface+距離区分が一致して「評価対象になった」ルール ID
+    # missed_rule_ids:   evaluated だが going / 上3F / 通過順位で不発になった ID
+    evaluated_rule_ids: list[str] = field(default_factory=list)
+    missed_rule_ids: list[str] = field(default_factory=list)
 
 
 # =====================================================================
@@ -210,9 +215,33 @@ def compute_horse_rating(
         ]
 
     # ----- C/D/E 評価(過去走ごと、policy に従って絞り込み + dedup) -----
+    # evaluated_rule_ids: surface + 距離区分が一致して「評価対象になった」 ID。
+    # 後で missed_rule_ids = evaluated - credited を算出して UI に表示する
+    # (お父様向けに「該当ルールなし」固定でなく「試行したが不発」を見せる)。
+    evaluated_rule_ids: set[str] = set()
+
     for run_idx, run in target_pairs:
         if run is None:
             continue
+
+        # 「surface + 距離区分」が一致するルールを「評価対象」として集める
+        run_surface = str(run.get("surface") or "").strip()
+        try:
+            run_distance = int(run["distance"]) if run.get("distance") else 0
+        except (TypeError, ValueError):
+            run_distance = 0
+        if run_surface and run_distance > 0:
+            for r in _ALL_CDE_RULES:
+                if r.spec is None:
+                    continue
+                if r.spec.surface != run_surface:
+                    continue
+                try:
+                    if r.spec.distance_match(run_distance):
+                        evaluated_rule_ids.add(r.rule_id)
+                except Exception:
+                    pass
+
         kept = _evaluate_cde_for_run(run, policy=policy)
         for rule, reason in kept:
             if rule.rule_id in credited_rule_ids:
@@ -270,6 +299,9 @@ def compute_horse_rating(
         if rule and rule.contributes_to_rating:
             total += hit.rate
 
+    # 「試行したが不発」のルール = 評価対象 - 発火済
+    missed = sorted(evaluated_rule_ids - credited_rule_ids)
+
     return HorseRating(
         horse_id=horse_id,
         horse_name=horse_name,
@@ -282,6 +314,8 @@ def compute_horse_rating(
         last_finishing_position=last_finishing_position,
         today_carry_weight=today_carry_weight,
         rule24_active=rule24_active,
+        evaluated_rule_ids=sorted(evaluated_rule_ids),
+        missed_rule_ids=missed,
     )
 
 
