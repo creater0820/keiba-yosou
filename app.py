@@ -38,12 +38,6 @@ from prediction_logic import (
     predict_all_races_cached,
 )
 from utils.recent_runs_renderer import render_recent_runs_matrix
-from utils.loading_overlay import (
-    render_running_horse_overlay,
-    trigger_overlay_inline,
-    diagnostic_force_show,
-    diagnostic_status,
-)
 from utils.training_data import (
     match_training_to_horses,
     parse_training_csv,
@@ -58,13 +52,6 @@ st.set_page_config(
     page_icon="🏇",
     layout="wide",
 )
-
-# v1.6.2: 走る馬オーバーレイを 1 度だけインストール。
-# 以降の rerun では JS の二重注入防止フラグで no-op になり、表示制御は
-# CSS が `body:has([data-test-script-state="running"])` 等で自動で行う。
-# Python レベルでは追加の overlay 操作は一切不要(placeholder / fragment
-# 内の制御も全部撤去済み)。
-render_running_horse_overlay("予想を計算中…", "馬たちが走っています 🏇")
 
 
 # =====================================================================
@@ -1137,28 +1124,6 @@ with st.sidebar:
     # サイドバーのタイトル + 「使い方」説明は個人運用フェーズ移行に伴い削除。
     # メインエリア上部の st.title「🏇 競馬予想アプリ(本ロジック v1.4)」は残す。
 
-    # ---------- v1.6.5 診断 UI(原因特定後 v1.7 で削除予定)----------
-    if st.checkbox(
-        "🔧 診断モード(走る馬 overlay)",
-        value=False,
-        key="_diag_overlay",
-        help=(
-            "v1.6.5 限定の診断機能。画面右下に「overlay: ready」バッジが"
-            "出ていれば JS 注入は成功しています。"
-        ),
-    ):
-        st.caption(
-            "**手順**: \n"
-            "1. 右下のバッジに `overlay: ready` 等が出ているか確認 \n"
-            "2. 下のボタンで馬を強制表示 → 馬が画面を走るか目視 \n"
-            "3. 「listener 状況確認」で `installed=true` か確認"
-        )
-        if st.button("🐎 馬を強制表示テスト", key="_diag_force"):
-            diagnostic_force_show()
-        if st.button("📡 listener 状況確認", key="_diag_status"):
-            diagnostic_status()
-        st.divider()
-
     if race_card_df is not None and "racecourse" in race_card_df.columns:
         st.divider()
         st.subheader("📍 競馬場フィルタ")
@@ -1375,12 +1340,8 @@ if race_card_df is not None:
 if race_card_df is not None and historical is not None:
     st.divider()
     if st.button("🎯 予想実行", type="primary", use_container_width=True):
-        # v1.6.4: JS event listener(capture phase の click)で showOverlay
-        # は既に呼ばれているはずだが、何らかの理由で listener が発火しない
-        # ケースに備えて、Python 側からも `window.__showHorseOverlay()` を
-        # 即時呼び出して保険をかける。状態機械の早期 return で二重発火
-        # しても無害(state !== IDLE で ignored)。
-        trigger_overlay_inline()
+        # ローディング表示は Streamlit 純正の暗転 + 右上 "Running..." バッジ
+        # に任せる(v1.7.0 で v1.6.x の独自 overlay 演出は完全撤去)。
 
         # race_card_df は上の post-sidebar enrich 共通パスで既に補完済み。
         # cache_hash は馬場切替で予想結果が変わる DC モードのみ going を含める。

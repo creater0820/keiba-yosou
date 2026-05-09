@@ -473,41 +473,42 @@ keiba-yosou/
     `window.__showHorseOverlay()` を即時呼び出して保険。状態機械の早期
     return で二重発火しても無害
   * 注入合計 12.1 KB、`:has()` 不使用で常時表示バグの再発防止
-- **v1.6.5 UX**(現行、2026-05): **診断版 — `components.html()` 経路 +
-  可視デバッグバッジ + 強制トリガー UI**。
-  * 主因仮説の確定: Streamlit 1.30+(本プロジェクト 1.57.0)では
-    `st.markdown(unsafe_allow_html=True)` 経由の `<script>` がサニタイザで
-    実行されない。v1.6.0〜v1.6.4 が実機で機能しなかった根本原因。
-  * 解決: `streamlit.components.v1.html(html, height=0, width=0)` で 0px
-    の不可視 iframe を作り、その内部で実行された `<script>` から
-    `window.parent.document` に overlay を注入する公式保証経路に切替。
-  * 画面右下に **`#horse-debug-badge`** を常時表示し、JS の各段階で
-    textContent を更新(`overlay: ready (parent)` / `click@btn:予想実行`
-    / `SHOWN(predict)` / `RUNNING_DETECTED` / `IDLE` 等)。
-    お父様が DevTools を開かなくても状態判別可能。
-  * インストール時に環境調査ログを強制出力(iframe 検出 / CSP テスト /
-    DOM 要素カウント for button・input[type=radio]・[role=radio]・
-    [data-baseweb=radio])。
-  * 5 階層 textContent 検査でラジオ判定を仮想スクロール対応に。
-  * サイドバーに **🔧 診断モード** チェックボックスを設け、
-    「🐎 馬を強制表示テスト」+「📡 listener 状況確認」ボタンで原因特定可能。
-  * 強制表示で馬が出る → イベント検知の問題、出ない → CSS / overlay 注入
-    の問題、と切り分け可能。
-  * DEBUG=True デフォルト、原因特定後 v1.7 で診断 UI と DEBUG を撤去予定。
+- **v1.6.5 UX**(2026-05): 診断版 — `components.html()` 経路 + 可視デバッグ
+  バッジ + 強制トリガー UI。最終的に予想一覧描画に支障が出たため撤去。
+- **v1.7.0 UX**(現行、2026-05): **走る馬 overlay を完全撤去**して
+  Streamlit 純正の暗転 + 右上 "Running..." バッジに戻す。
+  * 撤去理由: v1.6.0〜v1.6.5 の 6 度の試行(`st.empty()` placeholder /
+    `MutationObserver` / CSS-first `:has()` / ホワイトリスト click 検出 /
+    状態機械 + 最小表示時間 / `components.html()` 経路 + 診断バッジ)
+    すべて Streamlit の rerun モデル / iframe sandbox / `<script>` サニタイズ
+    仕様と互換性が取れず、最後は予想一覧の描画自体に支障が出るに至った
+    ため機能本体への影響を避けて撤去を決定。
+  * 削除内容: `utils/loading_overlay.py` ファイル削除、`app.py` から
+    `render_running_horse_overlay` / `trigger_overlay_inline` /
+    `diagnostic_force_show` / `diagnostic_status` の import + 呼び出し +
+    サイドバー「🔧 診断モード」UI ブロック + 予想実行ボタンの Python
+    フォールバック呼び出しをすべて除去。
+  * **保持されたもの**(全て不変):
+    - v1.4 ロジック(直近10走 + C/D/E/F1〜F5/A2〜A5/B1〜B2 全ルール)
+    - v1.5 坂路調教 CSV 連携 + F4/F5 発火
+    - v1.5.x 性能改善(30.8s → 7.77s、`iterrows()` 撤去 + 距離別 numpy
+      バケット + `to_dict("records")` 化、計 15 箇所 + 5 箇所)
+    - session_state の主要キー(SS_FILE_BYTES / all_predictions /
+      course_filter / dc_going / uploaded_csv_bytes /
+      uploaded_training_bytes)変更なし
+    - DC / RA+SE / 坂路調教 CSV 互換性、ロジック説明ページ session 共有
+  * 検証: 全 117 テスト pass / DC + RA+SE 形式 snapshot diff = 0 行
+    (v1.5.x baseline と完全一致)/ AST OK / Streamlit smoke test 無エラー
 
-【お父様向け診断 6 ステップ(v1.6.5)】
-1. アプリを開く → 画面 **右下** に黒い小さなバッジ `overlay: ready (...)`
-   が見えるか確認
-   - 見えない → JS 自体が動いていない(CSP / iframe sandbox 等)
-   - 見える → JS 注入成功、次へ
-2. サイドバーの「🔧 診断モード」をチェック
-3. 「🐎 馬を強制表示テスト」ボタンを押す
-   - 馬が画面を走る → 注入は OK、残るは「click イベントが届いていない」
-   - 馬が出ない + alert が出る → JS 経路は生きてるが overlay show 失敗
-   - 何も出ない → JS 全体が止まっている
-4. 「📡 listener 状況確認」を押す → alert で `installed=true` を確認
-5. 「予想実行」ボタンや競馬場ラジオを押した時、右下バッジが
-   `click@btn:予想実行` や `click@radio:競馬場(click)` に変わるか確認
-   - 変わる + `SHOWN` に進む → 馬が出ているはず
-   - 変わらない → React で stopPropagation されている可能性
-6. バッジの最終状態 + 馬が出たか + alert の内容を開発者に報告
+【Lessons learned(将来の UX 機能追加時の指針)】
+- Streamlit のサーバ駆動 rerun モデル下では、クライアント側で複雑な
+  状態を持つカスタム overlay は壊れやすい。`<body>` 直下への DOM 注入
+  を維持するのは困難で、rerun ごとの DOM 置換タイミング・iframe
+  sandbox・`<script>` サニタイズ仕様の組み合わせで予期せぬ挙動が出る。
+- 「動いている感」を出したい場合は **パフォーマンス改善** で待ち時間
+  そのものを短くする方が確実(v1.5.x の 30s→7.77s が好例)。Streamlit
+  純正の右上 "Running..." バッジ + メインエリア半透明化で十分。
+- カスタム JS / CSS 注入 を試す場合は `streamlit.components.v1.html`
+  の iframe 経路を最初から使うこと(`st.markdown(unsafe_allow_html=True)`
+  経由の `<script>` は 1.30+ で実行されない)。それでも UX に組み込む
+  なら状態管理は最小化し、機能本体に影響しないよう完全に分離する。
