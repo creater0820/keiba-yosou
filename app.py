@@ -411,15 +411,21 @@ def render_predictions_section(
     sample_pred = next(iter(display_predictions.values()), None)
     sample_mode = getattr(sample_pred, "logic_mode", "onmark") if sample_pred else "onmark"
     if sample_mode == "dc":
-        st.warning(
-            "📋 **DC 形式(TARGET 簡易指数)で読み込み中**\n\n"
-            "馬名・騎手・上3F・通過順位・馬場 等の詳細情報が CSV に含まれない"
-            "ため、**TARGET 指数 (col[5]) を rating として直接採用** する簡易"
-            "予想モードで動作しています。馬名は「馬番 N」表記で、騎手変更"
-            "判定や C/D/E ルール群は無効化されています。\n\n"
-            "より詳しい予想を行うには TARGET frontier JV の **「Z メインメニュー → "
-            "開催成績CSV出力 → フルセット+単勝オッズ」** からエクスポートした "
-            "CSV を使用してください(`docs/DAILY_RACE_CARD.md` 参照)。"
+        # DC 形式 v1.2: 過去走パターンマッチで historical 連携した馬は
+        # 本ロジック v1.1 のフルモード(C/D/E/F1/F2/F3)で評価される。
+        # マッチ失敗馬は DC 簡易モード(TARGET 指数 単独)で fallback。
+        match_count = race_card_df.attrs.get("dc_match_count", 0)
+        total_count = race_card_df.attrs.get("dc_total_count", 0)
+        going = race_card_df.attrs.get("dc_going", "良")
+        match_rate = (match_count / total_count * 100) if total_count else 0
+        st.success(
+            f"📊 **DC 形式 v1.2 ハイブリッドモードで動作中**\n\n"
+            f"過去走パターンマッチで **{match_count} / {total_count} 頭"
+            f"({match_rate:.1f}%)** を historical/races.parquet に紐付けました。\n"
+            f"- マッチ成功馬: 本ロジック v1.1 の C/D/E/F1/F2 ルールでフル評価\n"
+            f"- マッチ失敗馬: TARGET 指数 (col[5]) 直接採用の簡易モード\n"
+            f"- 当日馬場: **{going}**(サイドバー「🏟 当日馬場」で変更可能)\n\n"
+            f"※ 当日斤量(F3 ルール)・坂路調教(F4/F5)は DC に含まれず永続無効。"
         )
     elif sample_mode == "rating":
         st.caption(
@@ -647,6 +653,23 @@ with st.sidebar:
     )
     st.divider()
 
+    # ----- DC 形式時: 当日馬場ラジオ(C/D/E ルールの 良/重 分岐に必要) -----
+    if race_card_df is not None and race_card_df.attrs.get("data_format") == "dc":
+        st.subheader("🏟 当日馬場")
+        st.caption("DC 形式は馬場情報を含まないため、ここで指定すると "
+                   "C/D/E ルールが正しく分岐します。")
+        st.radio(
+            label="当日の馬場状態",
+            options=["良", "稍重", "重", "不良"],
+            index=["良", "稍重", "重", "不良"].index(
+                st.session_state.get("dc_going", "良")
+            ),
+            key="dc_going",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        st.divider()
+
     st.title("🏇 競馬予想アプリ")
     st.caption("JRA中央競馬・本ロジック v1.0")
 
@@ -804,9 +827,19 @@ if race_card_df is not None:
 if race_card_df is not None and historical is not None:
     st.divider()
     if st.button("🎯 予想実行(本ロジック v1.0)", type="primary", use_container_width=True):
-        all_predictions = predict_all_races_cached(file_hash, race_card_df, historical)
+        # DC 形式の場合は予想前に historical 連携で過去走を補完(v1.2 フルモード)
+        cache_hash = file_hash
+        if race_card_df.attrs.get("data_format") == "dc":
+            from data_loader import enrich_dc_with_historical
+            today_going = st.session_state.get("dc_going", "良")
+            race_card_df = enrich_dc_with_historical(
+                race_card_df, historical.races, today_going=today_going,
+            )
+            # cache を 馬場ごとに無効化(同 CSV でも 良/重 で結果が変わる)
+            cache_hash = f"{file_hash}_dc_{today_going}"
+        all_predictions = predict_all_races_cached(cache_hash, race_card_df, historical)
         st.session_state["all_predictions"] = all_predictions
-        st.session_state["predictions_for_file"] = file_hash
+        st.session_state["predictions_for_file"] = cache_hash
         # サイドバーは script の先頭付近で描画されるので、その時点で
         # session_state["all_predictions"] を読めるよう即座に rerun する。
         # (予想実行ボタンはサイドバーより後ろにあるため、この rerun を挟まないと
@@ -817,9 +850,17 @@ if race_card_df is not None and historical is not None:
 # =====================================================================
 # 予想結果の描画
 # =====================================================================
+# predictions_for_file は DC モードでは "<file_hash>_dc_<going>" 形式なので
+# 完全一致ではなく前方一致(file_hash で始まる)で判定する
 predictions_in_session = st.session_state.get("all_predictions")
+session_pred_key = st.session_state.get("predictions_for_file")
+key_match = (
+    session_pred_key is not None
+    and file_hash is not None
+    and (session_pred_key == file_hash or session_pred_key.startswith(f"{file_hash}_"))
+)
 if (predictions_in_session is not None
-        and st.session_state.get("predictions_for_file") == file_hash
+        and key_match
         and race_card_df is not None
         and historical is not None):
     render_predictions_section(
