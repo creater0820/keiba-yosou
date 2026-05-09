@@ -638,10 +638,19 @@ if file_bytes is not None:
 #  attrs が消えて「過去走パターンマッチ 0/0 (0%)」と誤表示されていた)
 # 注: enrich は historical の引き当てがメインで <1 秒なので毎回呼んでも体感影響なし。
 
-# 別ファイルがアップロードされたら、前回の予想結果は破棄
-if file_hash is not None and st.session_state.get("predictions_for_file") != file_hash:
-    if uploaded is not None:
-        # 新規アップロードの時のみ予想を破棄(復元時は既存の予想を残したい)
+# 別ファイルがアップロードされたら、前回の予想結果は破棄。
+# DC モードでは session 側に "<file_hash>_dc_<going>" 形式で保存するので
+# 完全一致ではなく prefix 一致(file_hash で始まるか)で判定する。
+# さもないと毎 rerun で all_predictions が pop されて結果が永続表示できない
+# (commit 01a815b 後の本番事故)。
+if file_hash is not None and uploaded is not None:
+    saved_key = st.session_state.get("predictions_for_file")
+    same_file = (
+        saved_key is not None
+        and (saved_key == file_hash or saved_key.startswith(f"{file_hash}_"))
+    )
+    if not same_file:
+        # 真に別ファイルがアップロードされた時のみ予想を破棄
         st.session_state.pop("all_predictions", None)
         st.session_state.pop("predictions_for_file", None)
 
