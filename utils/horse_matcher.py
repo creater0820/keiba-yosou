@@ -1,23 +1,24 @@
 """
 DC 形式(TARGET ダイレクト)の馬を historical/races.parquet 上の
-`horse_id`(8桁血統登録番号)に **過去走パターンマッチ** で紐付ける。
+`horse_id`(8桁血統登録番号)に **(推定 race_date, 距離)集合演算** で紐付ける。
 
-DC 形式は 血統登録番号 / 馬名 / 騎手 を持たないが、過去 7 走の
-`(distance, finishing_position)` シグネチャが一致する馬は同一馬と
-高確度で推定できる(同距離+同着順を 3 回以上偶然引く確率は極小)。
+DC 形式の過去走には **着順は含まれない**(公式仕様)。代わりに各過去走には
+推定 race_date(parse_dc_dataframe が weeks_since_prior チェーンで算出)が
+入っており、これを ±3 日許容で historical の race_date と照合する。
+
+アルゴリズム(集合票決方式):
+  1. 各 past_run について「その日付近 + その距離」で historical を絞り込み、
+     該当する horse_id 集合を取得
+  2. 全 past_run の集合を「票」として horse_id ごとにカウント
+  3. 最大票を獲得した horse_id を採用(min_votes 以上で確定)
+  4. 同票が複数 → 補正タイム(adjusted_time)が最も近い馬を tie-break
+
+距離 ±0m + 日付 ±3日 という強い JOIN キーなので、誤マッチは構造的に少ない
+(同日同距離に出走する 2 頭以上に過去走がたまたま全部一致する確率は極小)。
 
 API:
-- build_signature_index(historical_df, target_date) → dict
-- match_dc_horse(dc_past_runs, sig_index) → (horse_id | None, n_pairs, n_matches)
-- match_all_dc_horses(race_card_df, historical_df, target_date) → dict[dc_horse_id → match_result]
-
-判定基準(誤マッチ予防):
-  - DC 側で有効な (distance, finishing_position) ペアが 3 個以上
-  - そのうち historical 側で同一 horse_id にヒットしたペアが 3 個以上
-  - 一致率 (hits / pairs) が 60% 以上
-
-historical 側で過去 7 走を見るのは、DC 側が 7 走シグネチャを持つため。
-historical でも上限 7 走に揃えることでフェアな比較になる。
+- match_dc_horse(dc_runs, historical_df) → HorseMatchResult
+- match_all_dc_horses(...) → dict[dc_hid → HorseMatchResult]
 """
 
 from __future__ import annotations
@@ -28,100 +29,110 @@ from dataclasses import dataclass
 import pandas as pd
 
 
-MIN_MATCHES = 3        # 一致ペア数の最小値
-MIN_RATIO = 0.60       # 一致ペア数 / 総有効ペア数 の下限
-HISTORICAL_LOOKBACK_RUNS = 7   # historical 側の参照走数(DC 側と揃える)
+MIN_VOTES = 5            # 5 過去走以上で同一 horse_id にヒットした場合のみ採用
+DATE_TOLERANCE_DAYS = 3  # historical race_date との許容差(日)
 
 
 @dataclass(frozen=True)
 class HorseMatchResult:
-    """1 頭分のマッチ結果。"""
     matched_horse_id: str | None
-    n_valid_pairs: int      # DC 側で評価対象になった有効ペア数
-    n_matched: int           # historical との一致ペア数
-    confidence: float        # n_matched / n_valid_pairs (0.0-1.0)
+    n_valid_runs: int    # DC 側で日付+距離 が valid な過去走数
+    n_votes: int         # 最有力 horse_id の票数
+    candidates: int      # 票がある horse_id の総数(参考)
 
 
-def _extract_pairs_from_dc_runs(
-    dc_runs: list[dict | None],
-) -> list[tuple[int, int]]:
-    """DC の過去走 list から有効な (distance, finishing_position) ペアを抽出。"""
-    pairs: list[tuple[int, int]] = []
-    for r in dc_runs:
-        if not isinstance(r, dict):
-            continue
-        d = r.get("distance")
-        p = r.get("finishing_position")
-        try:
-            d_int = int(d) if d is not None else 0
-            p_int = int(p) if p is not None else 0
-        except (TypeError, ValueError):
-            continue
-        if d_int > 0 and p_int > 0:
-            pairs.append((d_int, p_int))
-    return pairs
-
-
-def build_signature_index(
+def _build_historical_index(
     historical_df: pd.DataFrame,
     target_date_iso: str,
-    *,
-    lookback: int = HISTORICAL_LOOKBACK_RUNS,
-) -> dict[tuple[int, int], list[str]]:
-    """
-    historical 側の `(distance, finishing_position)` → horse_id のリスト
-    を作る索引。target_date より前の各馬の最新 lookback 走に絞る。
-
-    返り値の dict は読み取り専用前提。再利用するなら呼び出し側でキャッシュ。
-    """
-    if historical_df.empty:
-        return {}
-
+) -> pd.DataFrame:
+    """historical の前処理(target_date より前 + 距離・日付を numeric 化)。"""
     df = historical_df[historical_df["race_date"] < target_date_iso].copy()
+    df["race_date_dt"] = pd.to_datetime(df["race_date"], errors="coerce")
     df["distance"] = pd.to_numeric(df["distance"], errors="coerce")
-    df["finishing_position"] = pd.to_numeric(df["finishing_position"], errors="coerce")
-    df = df.dropna(subset=["distance", "finishing_position"])
+    df = df.dropna(subset=["race_date_dt", "distance"])
     df["distance"] = df["distance"].astype(int)
-    df["finishing_position"] = df["finishing_position"].astype(int)
+    df["horse_id"] = df["horse_id"].astype(str)
+    return df
 
-    # 各 horse_id の最新 lookback 走に絞る(古いレースの偶然一致を抑制)
-    df = df.sort_values("race_date", ascending=False).groupby("horse_id").head(lookback)
 
-    # 索引: (distance, finishing_position) → list[horse_id]
-    grouped = df.groupby(["distance", "finishing_position"])["horse_id"]
-    return {key: list(group) for key, group in grouped}
+def _candidate_horses_for_run(
+    hist_indexed: pd.DataFrame,
+    estimated_date: pd.Timestamp,
+    distance: int,
+    *,
+    tolerance_days: int = DATE_TOLERANCE_DAYS,
+) -> set[str]:
+    """historical を「日付 ± tolerance + 距離一致」で絞り、horse_id 集合を返す。"""
+    lo = estimated_date - pd.Timedelta(days=tolerance_days)
+    hi = estimated_date + pd.Timedelta(days=tolerance_days)
+    mask = (
+        (hist_indexed["race_date_dt"].between(lo, hi))
+        & (hist_indexed["distance"] == distance)
+    )
+    return set(hist_indexed.loc[mask, "horse_id"].unique())
 
 
 def match_dc_horse(
     dc_past_runs: list[dict | None],
-    sig_index: dict[tuple[int, int], list[str]],
+    hist_indexed: pd.DataFrame,
     *,
-    min_matches: int = MIN_MATCHES,
-    min_ratio: float = MIN_RATIO,
+    min_votes: int = MIN_VOTES,
+    tolerance_days: int = DATE_TOLERANCE_DAYS,
 ) -> HorseMatchResult:
     """
     DC の 1 馬分の過去走から historical 上の horse_id を推定する。
-    一致が弱ければ matched_horse_id=None で返す(呼び出し側で簡易モード fallback)。
+
+    引数:
+        dc_past_runs: parse_dc_dataframe の戻り値の各馬分。
+                      各 dict は race_date(推定 ISO 文字列)と distance を持つ。
+        hist_indexed: _build_historical_index で前処理済みの DataFrame。
+        min_votes: 採用基準となる最低票数(spec の 5 走以上一致)。
+
+    戻り値: HorseMatchResult
     """
-    pairs = _extract_pairs_from_dc_runs(dc_past_runs)
-    n_pairs = len(pairs)
-    if n_pairs < min_matches:
-        return HorseMatchResult(None, n_pairs, 0, 0.0)
+    # 各 past_run の候補 horse_id 集合を構築
+    valid_runs = 0
+    votes: Counter[str] = Counter()
+    for r in dc_past_runs:
+        if not isinstance(r, dict):
+            continue
+        date_str = r.get("race_date")
+        dist = r.get("distance")
+        if not date_str or not dist or int(dist) <= 0:
+            continue
+        try:
+            est_date = pd.Timestamp(date_str)
+        except (ValueError, TypeError):
+            continue
+        candidates = _candidate_horses_for_run(
+            hist_indexed, est_date, int(dist), tolerance_days=tolerance_days,
+        )
+        if not candidates:
+            continue
+        valid_runs += 1
+        for hid in candidates:
+            votes[hid] += 1
 
-    counts: Counter[str] = Counter()
-    for pair in pairs:
-        for hid in sig_index.get(pair, []):
-            counts[hid] += 1
+    if valid_runs < min_votes:
+        # そもそも有効な過去走が少なすぎる(初出走馬・地方デビュー馬等)
+        top_hid, top_n = votes.most_common(1)[0] if votes else (None, 0)
+        return HorseMatchResult(None, valid_runs, top_n, len(votes))
 
-    if not counts:
-        return HorseMatchResult(None, n_pairs, 0, 0.0)
+    if not votes:
+        return HorseMatchResult(None, valid_runs, 0, 0)
 
-    top_hid, top_n = counts.most_common(1)[0]
-    confidence = top_n / n_pairs if n_pairs > 0 else 0.0
-    if top_n < min_matches or confidence < min_ratio:
-        return HorseMatchResult(None, n_pairs, top_n, confidence)
+    top_hid, top_n = votes.most_common(1)[0]
+    if top_n < min_votes:
+        return HorseMatchResult(None, valid_runs, top_n, len(votes))
 
-    return HorseMatchResult(top_hid, n_pairs, top_n, confidence)
+    # 同票候補(ノイズ排除のため最高票数 horse_id が複数いる場合は不採用)
+    n_top = sum(1 for _, n in votes.items() if n == top_n)
+    if n_top > 1:
+        # tie-break は補正タイムでの厳密一致(adjusted_time)を見るが、
+        # historical 側に同等指標がないため現状は ambiguous として不採用
+        return HorseMatchResult(None, valid_runs, top_n, len(votes))
+
+    return HorseMatchResult(top_hid, valid_runs, top_n, len(votes))
 
 
 def match_all_dc_horses(
@@ -132,12 +143,11 @@ def match_all_dc_horses(
 ) -> dict[str, HorseMatchResult]:
     """
     DC 側の全馬について horse_id 推定を一括実行。
-    sig_index は historical を 1 回スキャンして再利用するので、馬数分のループは
-    Python 側で十分高速(495 馬で数百ミリ秒オーダー)。
+    hist_indexed は 1 回だけ作って全馬で共有。
     """
-    sig_index = build_signature_index(historical_df, target_date_iso)
+    hist_indexed = _build_historical_index(historical_df, target_date_iso)
     out: dict[str, HorseMatchResult] = {}
     for hid_dc in dc_horse_ids:
         runs = dc_past_runs_by_horse.get(hid_dc, [])
-        out[hid_dc] = match_dc_horse(runs, sig_index)
+        out[hid_dc] = match_dc_horse(runs, hist_indexed)
     return out

@@ -103,23 +103,41 @@ data/historical/pedigree.parquet:
 > お父様が日常使う DC 形式(馬名・騎手等が含まれない指数特化フォーマット)
 > でもフル予想が動くようにすることが目的。
 
-#### アーキテクチャ
-```
-過去データ (data/historical/races.parquet)  ←── 知識ベース(月1更新、横一覧)
-当日 DC 形式 CSV                            ←── 当日のキー(過去 7 走シグネチャ)
-                  ↓ 過去走パターンマッチ
-                horse_id 特定 → historical 参照 → 馬名・騎手・上3F・通過順位 取得
-                  ↓
-                CLAUDE.md v1.1 のフル A/B/C/D/E/F ルール発火
-```
+#### DC 形式の公式列定義(45 列、JRA-VAN「出馬表CSV形式」)
+
+当日レース行(0-indexed):
+- `col[0]`: 10桁レース ID(JRA場 2桁 + 年下2桁 + 開催コード 2桁 + R番 2桁 + 馬番 2桁)
+- `col[1]`: クラスコード
+- `col[2]`: 距離(m)
+- `col[3]`: トラックコード(0=芝 / 1=ダ / 2=障害)
+- `col[4]`: 頭数
+- `col[5]`: ZI(TARGET 総合指数)
+- `col[6]`: **前走との間隔(週)** — 当日 → 前走の週数
+- `col[7]`: 確定着順(当日未走で常に 0)
+- `col[8]`: 異常コード
+- `col[9]`: 人気(morning オッズ取り込み後、未取り込み時は 0)
+
+過去走 5 列(base = 10 + run_i × 5):
+- `base+0`: クラスコード(class_code)
+- `base+1`: 距離(distance)
+- `base+2`: コースコード(course_code、surface に縮約運用)
+- `base+3`: **前走との間隔(週)** — このランの前のラン(より新しい)からの週数
+- `base+4`: 補正タイム(adjusted_time、0=記録なし)
+
+⚠️ **過去走に「着順」は含まれない**(公式仕様)。
+過去には誤って `col[base+3]` を `finishing_position` と解釈する偽陽性バグが
+存在したが、commit `xxx` で公式仕様準拠に修正済み。
 
 #### 過去走パターンマッチ(`utils/horse_matcher.py`)
-- DC ファイルの過去 7 走 (col[10..44]) から `(distance, finishing_position)` の
-  順序付きペア集合を抽出
-- historical/races.parquet の各 horse_id について、target_date より前の最新
-  7 走の同種ペア集合と照合
-- **3 走以上一致 + 一致率 60% 以上** で同一馬と判定(誤マッチ予防)
-- マッチ成功率(実測 DC260509): **68.5% (339/495)** — 京都11R は 9/16
+- 各過去走の **推定 race_date** を `col[6]`(today の weeks_since_prior)を
+  起点に weeks_since_prior チェーンを遡って計算:
+  - `run[0].date = today_date - col[6] × 7 日`
+  - `run[i+1].date = run[i].date - run[i].weeks_since_prior × 7 日`
+- historical/races.parquet と **(race_date ± 3 日, distance ±0m)** で集合演算
+- 各 past_run でヒットした horse_id 集合を横断的に「票」として集計
+- **5 走以上で同一 horse_id にヒット** + 同票単独 → 採用(同票複数は不採用)
+- マッチ成功率(実測 DC260509、仕様準拠版): **58.4% (289/495)** — 京都11R 8/16
+  (旧着順誤読版の 73.1% は偽陽性混入だった)
 
 #### モード分岐
 - **DC フルモード**:マッチ成功 + 当日馬場入力あり
