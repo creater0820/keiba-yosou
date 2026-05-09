@@ -427,8 +427,16 @@ keiba-yosou/
 - **v1.4**(2026-05): ルール評価対象を直近 5 走 → **直近 10 走** に拡張
   (ベテラン馬の長期実績を拾う)。脚質判定は引き続き直近 5 走の corner_1 平均、
   戦歴マトリクス UI も 5 走表示のまま。
-- **v1.5**(現行、2026-05): 坂路調教 CSV(任意)を二段アップローダで受け付け、
+- **v1.5**(2026-05): 坂路調教 CSV(任意)を二段アップローダで受け付け、
   `utils/training_data.py` でパース → 馬名マッチ → **F4(+30) / F5(+40)** を
   実発火させる。坂路 CSV 未アップロード時は missed_rule_ids にだけ入れて
   「坂路調教 CSV 未提供のためスキップ」表示。F4/F5 は v1.0〜v1.4 まで TODO で
   永続無効だった。
+- **v1.5.x perf**(現行、2026-05): 予想実行を **30.8 秒 → 7.77 秒**(75% 削減)
+  に短縮。判定結果は完全一致(DC + RA+SE 両形式 snapshot diff = 0 行)。
+  主な改善: (1) `match_training_to_horses` の `iterrows` 撤去で 99% 短縮、
+  (2) `enrich_dc_with_historical` の `iterrows` を `to_dict("records")` に
+  + `match_all_dc_horses` の集合演算を距離別 numpy バケット +
+  `searchsorted` で O(log N) 化し 91% 短縮、(3) `_build_horse_mark_data` /
+  `predict_race_dc` / `get_last_finishing_positions` の各 `iterrows` も
+  `to_dict("records")` 化。

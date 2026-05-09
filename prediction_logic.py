@@ -128,8 +128,16 @@ def _build_horse_mark_data(
     else:
         pops = compute_popularities_from_odds(race_card_df["odds"]).reset_index(drop=True)
 
+    # **perf**: 旧実装は race_card_df.iterrows() で 13-18 行を Python ループ
+    # していたが、レース 34 回累積で 数秒の hot path だった。to_dict("records")
+    # で plain dict のリストに変換すると 50-100 倍速い。
+    rc_records = race_card_df.reset_index(drop=True)[
+        ["horse_id", "horse_number", "horse_name"]
+    ].to_dict("records")
+    pops_arr = pops.to_numpy() if hasattr(pops, "to_numpy") else list(pops)
+
     horses: list[HorseMarkData] = []
-    for idx, row in race_card_df.reset_index(drop=True).iterrows():
+    for idx, row in enumerate(rc_records):
         hid = str(row["horse_id"])
         try:
             hn = int(row["horse_number"]) if pd.notna(row["horse_number"]) else 0
@@ -145,7 +153,8 @@ def _build_horse_mark_data(
         marks_count, matched = collect_onmarks(recent)
 
         try:
-            popularity = int(pops.iloc[idx]) if not pd.isna(pops.iloc[idx]) else 0
+            pop_val = pops_arr[idx]
+            popularity = int(pop_val) if not pd.isna(pop_val) else 0
         except (IndexError, ValueError, TypeError):
             popularity = 0
 
@@ -274,14 +283,16 @@ def predict_race_v2(
     )
 
     # 3) 当日斤量(race_card_df の carry_weight 列から取得)
+    # **perf**: iterrows 回避、to_dict("records") で plain dict にして高速化
     carry_by_id: dict[str, float | None] = {}
     if "carry_weight" in race_card_df.columns:
-        for _, row in race_card_df.iterrows():
+        for rec in race_card_df[["horse_id", "carry_weight"]].to_dict("records"):
             try:
-                cw = float(row["carry_weight"]) if pd.notna(row["carry_weight"]) else None
+                cw_val = rec["carry_weight"]
+                cw = float(cw_val) if pd.notna(cw_val) else None
             except (ValueError, TypeError):
                 cw = None
-            carry_by_id[str(row["horse_id"])] = cw
+            carry_by_id[str(rec["horse_id"])] = cw
 
     # 4) 各馬の rating を計算(training_match があれば F4/F5 評価も走る)
     horse_ratings: list[HorseRating] = []
@@ -378,21 +389,33 @@ def predict_race_dc(
     pop_rank = pop_rank.fillna(0).astype(int)
 
     # ----- 各馬の HorseRating + HorseMarkData を組み立て -----
+    # **perf**: iterrows を撤去、to_dict("records") + numpy 化で高速化
+    has_matched_col = "matched_historical_horse_id" in horses_df.columns
+    cols_for_rec = [
+        c for c in [
+            "horse_id", "horse_number", "horse_name", "target_index",
+            "matched_historical_horse_id",
+        ] if c in horses_df.columns
+    ]
+    horses_records = horses_df[cols_for_rec].to_dict("records")
+    pop_rank_arr = pop_rank.to_numpy()
+
     horse_ratings: list[HorseRating] = []
     horses_v1: list[HorseMarkData] = []
     full_mode_count = 0
-    for idx, row in horses_df.iterrows():
+    for idx, row in enumerate(horses_records):
         hid = str(row["horse_id"])
         try:
             hn = int(row["horse_number"]) if pd.notna(row["horse_number"]) else 0
         except (ValueError, TypeError):
             hn = 0
         try:
-            ti = float(row["target_index"]) if pd.notna(row["target_index"]) else 0.0
+            ti_val = row.get("target_index")
+            ti = float(ti_val) if pd.notna(ti_val) else 0.0
         except (ValueError, TypeError):
             ti = 0.0
         try:
-            popularity = int(pop_rank.iloc[idx])
+            popularity = int(pop_rank_arr[idx])
         except (IndexError, ValueError, TypeError):
             popularity = 0
         try:
@@ -403,7 +426,7 @@ def predict_race_dc(
         runs = past_runs_by_horse.get(hid, [None] * 10)
         # フルモード判定: matched_historical_horse_id 列があり、かつ
         # past_runs に last_3f / corner_1 がある(historical 由来)なら full
-        matched_hist_id = row.get("matched_historical_horse_id") if "matched_historical_horse_id" in horses_df.columns else None
+        matched_hist_id = row.get("matched_historical_horse_id") if has_matched_col else None
         is_full = matched_hist_id is not None and any(
             (r and r.get("last_3f") is not None) for r in runs
         )

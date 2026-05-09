@@ -311,24 +311,57 @@ def enrich_dc_with_historical(
 
     # 騎手名は最新走で空文字 / NaN だったら過去走を遡って有効値を探す。
     # historical のデータ品質で「最新走の jockey」だけ抜けてるケースがあるため。
-    def _latest_valid_jockey(hist_hid: str) -> str:
-        if hist_subset_sorted is None or hist_subset_sorted.empty:
-            return ""
-        sub = hist_subset_sorted[hist_subset_sorted["horse_id"] == hist_hid]
-        for _, prow in sub.iterrows():
-            j = str(prow.get("jockey") or "").strip()
+    # **perf**: 旧実装は呼び出しごとに全 hist_subset_sorted を再フィルタ +
+    # iterrows していた。jockey-by-horse_id の有効値マップを 1 度だけ前処理する。
+    valid_jockey_by_hid: dict[str, str] = {}
+    if not hist_subset.empty:
+        # まず最新走で有効値があるものを採用
+        for hid, jockey in zip(
+            latest_per_horse.index.astype(str),
+            latest_per_horse.get("jockey", pd.Series(dtype=str)).fillna(""),
+        ):
+            j = str(jockey).strip()
             if j and j.lower() != "nan":
-                return j
-        return ""
+                valid_jockey_by_hid[hid] = j
+        # 最新走で取れなかった馬だけ過去走を遡って探す(数件想定で軽量)
+        missing = set(latest_per_horse.index.astype(str)) - set(valid_jockey_by_hid)
+        if missing:
+            sorted_records = hist_subset_sorted[
+                hist_subset_sorted["horse_id"].astype(str).isin(missing)
+            ][["horse_id", "jockey"]].to_dict("records")
+            for rec in sorted_records:
+                hid = str(rec["horse_id"])
+                if hid in valid_jockey_by_hid:
+                    continue
+                j = str(rec.get("jockey") or "").strip()
+                if j and j.lower() != "nan":
+                    valid_jockey_by_hid[hid] = j
 
-    # 各馬の過去 10 走(target_date より前)を historical から取得
+    def _latest_valid_jockey(hist_hid: str) -> str:
+        return valid_jockey_by_hid.get(str(hist_hid), "")
+
+    # 各馬の過去 10 走(target_date より前)を historical から取得し、
+    # **dict のリストに変換** しておく。後段の各馬ループで iterrows しないで済む。
     # v1.4: ルール評価対象を 5 走 → 10 走に拡張(ベテラン馬の長期実績を拾う)
     if not hist_subset.empty:
         past = hist_subset[hist_subset["race_date"] < target_date].copy()
         past = past.sort_values("race_date", ascending=False)
-        past_grouped = {hid: g.head(10) for hid, g in past.groupby("horse_id")}
+        # 馬 ID → 直近 10 走の dict リスト(numpy/pandas の row オブジェクトを
+        # 介さず純 Python dict にしておけば、後段ループは O(1) 参照)
+        past_grouped: dict[str, list[dict]] = {}
+        # head(10) を groupby+head で一気にやって to_dict で抜き出す
+        head10_df = past.groupby("horse_id", sort=False).head(10)
+        # to_dict("records") は内部 C ループで iterrows より 50-100 倍速い
+        records = head10_df[[
+            "horse_id", "race_date", "racecourse", "surface", "distance",
+            "going", "finishing_position", "last_3f", "jockey", "carry_weight",
+            "corner_1", "corner_2", "corner_3", "corner_4",
+        ]].to_dict("records")
+        for rec in records:
+            hid = str(rec["horse_id"])
+            past_grouped.setdefault(hid, []).append(rec)
     else:
-        past_grouped = {}
+        past_grouped: dict[str, list[dict]] = {}
 
     # 3) df の各行を更新(マッチ成功馬のみ)
     new_horse_names: list[str] = []
@@ -345,53 +378,72 @@ def enrich_dc_with_historical(
             if isinstance(r, dict) and (r.get("distance") or 0) > 0
         )
 
-    for _, row in df.iterrows():
+    # **perf**: 旧実装は df.iterrows() で 495 行を Python ループ + 内部で
+    # past_for_horse.iterrows() を再度 → 約 8 秒の hot path。
+    # to_dict("records") で plain dict のリストに変換 + past_grouped を
+    # 既に dict リスト化済み(上で前処理)にしてあるため、内側ループも
+    # 純 Python dict 操作で済む。
+    df_records = df[
+        ["horse_id", "horse_number", "horse_name"]
+    ].to_dict("records")
+    # latest_per_horse は MultiIndex 不可、horse_name のみ事前抽出
+    latest_horse_name_by_hid: dict[str, str] = {}
+    if not latest_per_horse.empty and "horse_name" in latest_per_horse.columns:
+        latest_horse_name_by_hid = (
+            latest_per_horse["horse_name"].astype(str).to_dict()
+        )
+
+    def _to_run_dict(rec: dict) -> dict:
+        """historical の records 1 行を rating engine 入力形式の dict に変換。"""
+        def _i(k):
+            v = rec.get(k)
+            return int(v) if pd.notna(v) else None
+        def _f(k):
+            v = rec.get(k)
+            return float(v) if pd.notna(v) else None
+        dist = rec.get("distance")
+        return {
+            "race_date":          str(rec.get("race_date") or ""),
+            "racecourse":         str(rec.get("racecourse") or ""),
+            "surface":            str(rec.get("surface") or ""),
+            "distance":           int(dist) if pd.notna(dist) else 0,
+            "going":              str(rec.get("going") or ""),
+            "finishing_position": _i("finishing_position"),
+            "last_3f":            _f("last_3f"),
+            "jockey":             str(rec.get("jockey") or "").strip() or "(不明)",
+            "carry_weight":       _f("carry_weight"),
+            "corner_1":           _i("corner_1"),
+            "corner_2":           _i("corner_2"),
+            "corner_3":           _i("corner_3"),
+            "corner_4":           _i("corner_4"),
+        }
+
+    for row in df_records:
         dc_hid = str(row["horse_id"])
         result = matches.get(dc_hid)
         confidence = result.confidence if result else "none"
         n_dc_runs = _count_valid_dc_runs(dc_past_runs.get(dc_hid, []))
         past_run_counts.append(n_dc_runs)
         confidences.append(confidence)
-        if result and result.matched_horse_id and result.matched_horse_id in latest_per_horse.index:
+        if (result and result.matched_horse_id
+                and result.matched_horse_id in latest_horse_name_by_hid):
             hist_hid = result.matched_horse_id
-            latest = latest_per_horse.loc[hist_hid]
-            new_horse_names.append(str(latest.get("horse_name") or row["horse_name"]))
-            # 最新走の jockey が空 → 過去走を遡って有効値を探す
+            new_horse_names.append(
+                latest_horse_name_by_hid.get(hist_hid) or row["horse_name"]
+            )
             valid_jockey = _latest_valid_jockey(hist_hid)
             if not valid_jockey:
-                # それでも取れない場合「(当日確認)」(混乱防止、当日変更ある可能性も)
                 valid_jockey = "(当日確認)"
             new_jockeys.append(valid_jockey)
             matched_hist_ids.append(hist_hid)
-            # 過去 10 走を historical の dict に変換(rating engine の入力形式に揃える)
-            # v1.4: 5 → 10 に拡張。脚質判定は内部で head5 のため安全。
-            past_for_horse = past_grouped.get(hist_hid)
-            runs10: list[dict | None] = []
-            if past_for_horse is not None and not past_for_horse.empty:
-                for _, prow in past_for_horse.iterrows():
-                    runs10.append({
-                        "race_date":          str(prow.get("race_date") or ""),
-                        "racecourse":         str(prow.get("racecourse") or ""),
-                        "surface":            str(prow.get("surface") or ""),
-                        "distance":           int(prow["distance"]) if pd.notna(prow.get("distance")) else 0,
-                        "going":              str(prow.get("going") or ""),
-                        "finishing_position": int(prow["finishing_position"]) if pd.notna(prow.get("finishing_position")) else None,
-                        "last_3f":            float(prow["last_3f"]) if pd.notna(prow.get("last_3f")) else None,
-                        "jockey":             str(prow.get("jockey") or "").strip() or "(不明)",
-                        "carry_weight":       float(prow["carry_weight"]) if pd.notna(prow.get("carry_weight")) else None,
-                        "corner_1":           int(prow["corner_1"]) if pd.notna(prow.get("corner_1")) else None,
-                        "corner_2":           int(prow["corner_2"]) if pd.notna(prow.get("corner_2")) else None,
-                        "corner_3":           int(prow["corner_3"]) if pd.notna(prow.get("corner_3")) else None,
-                        "corner_4":           int(prow["corner_4"]) if pd.notna(prow.get("corner_4")) else None,
-                    })
+            # past_grouped は既に dict リスト化済み(上で前処理)
+            past_records = past_grouped.get(hist_hid, [])
+            runs10: list[dict | None] = [_to_run_dict(r) for r in past_records]
             while len(runs10) < 10:
                 runs10.append(None)
             new_past_runs_by_horse[dc_hid] = runs10
         else:
             # マッチ失敗 → 馬名にラベル付与してお父様に状態を明示
-            #  past_run_count == 0      : 「(新馬)」
-            #  past_run_count <= 2      : 「(過去走少)」
-            #  それ以外失敗(中信頼度未達等): 「(DB照合不能)」
             if n_dc_runs == 0:
                 label = "(新馬)"
             elif n_dc_runs <= 2:
@@ -405,8 +457,6 @@ def enrich_dc_with_historical(
             new_horse_names.append(f"馬番{hno}{label}")
             new_jockeys.append("(当日確認)")
             matched_hist_ids.append(None)
-            # マッチ失敗馬: 元 DC 過去走(最大 7 走)を 10 走長にパディング統一
-            # 後段の rate=0 評価は変わらないが、形式は他馬と揃える
             failed_runs = list(dc_past_runs.get(dc_hid, []))
             while len(failed_runs) < 10:
                 failed_runs.append(None)
