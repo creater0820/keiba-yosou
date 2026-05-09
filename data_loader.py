@@ -321,11 +321,12 @@ def enrich_dc_with_historical(
                 return j
         return ""
 
-    # 各馬の過去 5 走(target_date より前)を historical から取得
+    # 各馬の過去 10 走(target_date より前)を historical から取得
+    # v1.4: ルール評価対象を 5 走 → 10 走に拡張(ベテラン馬の長期実績を拾う)
     if not hist_subset.empty:
         past = hist_subset[hist_subset["race_date"] < target_date].copy()
         past = past.sort_values("race_date", ascending=False)
-        past_grouped = {hid: g.head(5) for hid, g in past.groupby("horse_id")}
+        past_grouped = {hid: g.head(10) for hid, g in past.groupby("horse_id")}
     else:
         past_grouped = {}
 
@@ -362,12 +363,13 @@ def enrich_dc_with_historical(
                 valid_jockey = "(当日確認)"
             new_jockeys.append(valid_jockey)
             matched_hist_ids.append(hist_hid)
-            # 過去 5 走を historical の dict に変換(rating engine の入力形式に揃える)
+            # 過去 10 走を historical の dict に変換(rating engine の入力形式に揃える)
+            # v1.4: 5 → 10 に拡張。脚質判定は内部で head5 のため安全。
             past_for_horse = past_grouped.get(hist_hid)
-            runs5: list[dict | None] = []
+            runs10: list[dict | None] = []
             if past_for_horse is not None and not past_for_horse.empty:
                 for _, prow in past_for_horse.iterrows():
-                    runs5.append({
+                    runs10.append({
                         "race_date":          str(prow.get("race_date") or ""),
                         "racecourse":         str(prow.get("racecourse") or ""),
                         "surface":            str(prow.get("surface") or ""),
@@ -382,9 +384,9 @@ def enrich_dc_with_historical(
                         "corner_3":           int(prow["corner_3"]) if pd.notna(prow.get("corner_3")) else None,
                         "corner_4":           int(prow["corner_4"]) if pd.notna(prow.get("corner_4")) else None,
                     })
-            while len(runs5) < 5:
-                runs5.append(None)
-            new_past_runs_by_horse[dc_hid] = runs5
+            while len(runs10) < 10:
+                runs10.append(None)
+            new_past_runs_by_horse[dc_hid] = runs10
         else:
             # マッチ失敗 → 馬名にラベル付与してお父様に状態を明示
             #  past_run_count == 0      : 「(新馬)」
@@ -403,7 +405,12 @@ def enrich_dc_with_historical(
             new_horse_names.append(f"馬番{hno}{label}")
             new_jockeys.append("(当日確認)")
             matched_hist_ids.append(None)
-            new_past_runs_by_horse[dc_hid] = dc_past_runs.get(dc_hid, [None] * 5)
+            # マッチ失敗馬: 元 DC 過去走(最大 7 走)を 10 走長にパディング統一
+            # 後段の rate=0 評価は変わらないが、形式は他馬と揃える
+            failed_runs = list(dc_past_runs.get(dc_hid, []))
+            while len(failed_runs) < 10:
+                failed_runs.append(None)
+            new_past_runs_by_horse[dc_hid] = failed_runs[:10]
 
     df["horse_name"] = new_horse_names
     df["jockey"] = new_jockeys

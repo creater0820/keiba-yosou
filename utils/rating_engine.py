@@ -192,7 +192,8 @@ def compute_horse_rating(
         last_finishing_position: 前走着順(F2 / A3 等で参照)
         today_carry_weight: 当日斤量(F3 用、race_card_df から取得)
         past_runs: get_recent_runs_for_race の戻り値
-                   [前走, 2走前, 3走前, 4走前, 5走前](不足は None で末尾パディング)
+                   [前走, 2走前, ..., 10走前](不足は None で末尾パディング)
+                   v1.4 で 5 → 10 走に拡張。脚質判定は別経路で head5。
         race_meta: 当日レース情報(distance, surface, going, racecourse, race_number)
         policy: RatingPolicy.STRICT(デフォルト)or SUM_ALL
 
@@ -205,16 +206,17 @@ def compute_horse_rating(
     rule24_active = detect_rule_24_situation(past_runs)
 
     if rule24_active:
-        # 救済対象: 2走前 と 3走前(index 1 と 2)
+        # 救済対象: 2走前 と 3走前(spec 通り、10走化でも救済範囲は変えない)
         target_pairs = [
             (1, past_runs[1] if len(past_runs) > 1 else None),
             (2, past_runs[2] if len(past_runs) > 2 else None),
         ]
     else:
-        # 通常: 直近5走(index 0..4)を全評価
+        # 通常: v1.4 で 5 → 10 走に拡張(index 0..9)。
+        # C/D/E/F1 は同 rule_id が複数走で発火しても dedup で 1 回まで。
         target_pairs = [
             (i, past_runs[i] if i < len(past_runs) else None)
-            for i in range(5)
+            for i in range(10)
         ]
 
     # ----- C/D/E 評価(過去走ごと、policy に従って絞り込み + dedup) -----

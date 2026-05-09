@@ -57,18 +57,26 @@ data/historical/pedigree.parquet:
 5. 推奨理由の表示(クリックで展開)
 6. 予想結果の CSV/PDF ダウンロード
 
-## 推奨馬選定ロジック(本ロジック v1.1 — rating-based)
+## 推奨馬選定ロジック(本ロジック v1.4 — rating-based + 直近10走評価)
 
 > Phase 6 で v1.0 (○マーク方式、≥5 で ◎) から v1.1 (rating 合計、≥100 で ◎)
-> へ移行済み。`prediction_logic.LOGIC_MODE = "rating"` がデフォルト。
+> へ移行済み。v1.3 で TARGET 指数を rating から除外した純粋ロジックモード化。
+> **v1.4(2026-05 現在)**: ルール評価対象を直近 5 走 → 10 走に拡張し、
+> ベテラン馬の長期実績を拾えるようにした。
+> `prediction_logic.LOGIC_MODE = "rating"` がデフォルト。
 > v1.0 の○マーク方式は `LOGIC_MODE = "onmark"` で互換維持。
 > 仕様の単一情報源は `utils/rating_rules.py`(構造化データ)。
 
 ### 概要
 
-予想は「直近5走の評価 → 各ルールの rate 加算 → ◎判定(rating ≥ 100)→
+予想は「直近10走の評価 → 各ルールの rate 加算 → ◎判定(rating ≥ 100)→
 ワイド候補抽出 → 減点フィルタ → 買い目生成」の流れで構成される。
 合計 rating で順位づけする数値型エキスパートシステム。
+
+> **v1.4 注**: ルール評価対象は直近 10 走だが、**脚質判定**
+> (`determine_running_style`)は引き続き直近 5 走の corner_1 平均で判定する
+> (直近の脚質傾向が重要なため、10 走では古すぎる)。
+> **直近 N 走戦歴マトリクス UI** も 5 走表示のまま(画面幅・お父様の慣れの都合)。
 
 ルール体系(全 39 ルール、`utils/rating_rules.py`):
 | カテゴリ | 件数 | rating 加算 | rate | 内容 |

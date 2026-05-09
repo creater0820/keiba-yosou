@@ -12,12 +12,17 @@ import pandas as pd
 import streamlit as st
 
 
+# v1.4: ルール評価対象の過去走数を 5 → 10 に拡張(ベテラン馬の長期実績を拾う)。
+# 脚質判定(determine_running_style)は別途 head5 で抑制(直近の傾向重視)。
+DEFAULT_RECENT_N = 10
+
+
 @st.cache_data(show_spinner=False)
 def get_recent_runs_for_race(
     horse_ids: tuple[str, ...],
     target_date_iso: str,
     _historical_df: pd.DataFrame,
-    n: int = 5,
+    n: int = DEFAULT_RECENT_N,
 ) -> dict[str, list[dict | None]]:
     """
     指定したレース日(target_date_iso)以前のレースで、各馬の直近 n 走を返す。
@@ -73,7 +78,7 @@ def get_recent_n_runs(
     horse_id: str,
     target_race_date,
     historical_df: pd.DataFrame,
-    n: int = 5,
+    n: int = DEFAULT_RECENT_N,
 ) -> list[dict | None]:
     """
     単一馬の直近 N 走を返す(デバッグ・スポットチェック用ラッパ)。
