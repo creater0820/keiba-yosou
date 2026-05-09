@@ -751,7 +751,16 @@ def render_predictions_section(
                     )
                     for h in p.horses
                 ]
-                render_recent_runs_matrix(race_card_for_this, pseudo_preds, historical_races)
+                # perf: マトリクス HTML はレース毎に同一(predictions 不変)
+                # なので file_hash + going + race_id で cache key を組む。
+                # これで競馬場フィルタ切替の rerun では再構築されない。
+                _file_hash = st.session_state.get("uploaded_csv_hash", "")
+                _going = race_card_df.attrs.get("dc_going", "良")
+                _matrix_key = f"matrix_{_file_hash}_{_going}_{race_id}"
+                render_recent_runs_matrix(
+                    race_card_for_this, pseudo_preds, historical_races,
+                    cache_key=_matrix_key,
+                )
 
             _render_section_all_marks(p)
 
@@ -927,11 +936,25 @@ if (race_card_df is not None
         and file_hash is not None):
     from data_loader import enrich_dc_with_historical_cached
     today_going = st.session_state.get("dc_going", "良")
-    # キャッシュキー = (file_hash, today_going)。同じ CSV + 同じ馬場なら
-    # 2 回目以降の rerun で historical 159k 行スキャンを丸ごとスキップ。
-    race_card_df = enrich_dc_with_historical_cached(
-        file_hash, today_going, race_card_df, historical.races,
-    )
+    # **perf 対策**: @st.cache_data だけでは Streamlit の cache key 変動で
+    # まれに miss して enrich が 12 秒走ることがある(競馬場ラジオ切替で
+    # 体感 20 秒の主要因)。session_state による「同セッション内 ID-比較」
+    # の二段防御を足し、ラジオ切替の単純 rerun では enrich を絶対に
+    # 走らせない。session_state の値はメモリ参照のみで O(1)。
+    _enriched_session_key = f"_enriched_dc_{file_hash}_{today_going}"
+    _cached_enriched = st.session_state.get(_enriched_session_key)
+    if _cached_enriched is not None:
+        race_card_df = _cached_enriched
+    else:
+        race_card_df = enrich_dc_with_historical_cached(
+            file_hash, today_going, race_card_df, historical.races,
+        )
+        st.session_state[_enriched_session_key] = race_card_df
+        # 古い going 用エントリは消す(メモリ抑制)
+        for _k in list(st.session_state.keys()):
+            if (_k.startswith(f"_enriched_dc_{file_hash}_")
+                    and _k != _enriched_session_key):
+                st.session_state.pop(_k, None)
 
 
 # =====================================================================
