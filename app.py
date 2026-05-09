@@ -44,7 +44,7 @@ from utils.recent_runs_renderer import render_recent_runs_matrix
 # 画面全体の設定
 # =====================================================================
 st.set_page_config(
-    page_title="競馬予想アプリ(本ロジック v1.0)",
+    page_title="競馬予想アプリ(本ロジック v1.2)",
     page_icon="🏇",
     layout="wide",
 )
@@ -169,18 +169,23 @@ def _format_horse_runtime(horse) -> str:
 
 
 def _is_rating_mode(pred: RacePrediction) -> bool:
-    return getattr(pred, "logic_mode", "onmark") == "rating"
+    """rating ベースで描画するか(v1.1 rating + v1.2 DC ハイブリッド共に True)。
+
+    DC モードも horse_ratings に rating を保持するため rating モードと
+    同じ表記体系で扱う(rate XX、内訳表示等)。v1.0 onmark のみ False。
+    """
+    return getattr(pred, "logic_mode", "onmark") in ("rating", "dc")
 
 
 def _score_label(pred: RacePrediction, marks_or_rating: int) -> str:
-    """ロジックモードに応じた表記を返す。"""
+    """ロジックモードに応じた表記を返す(rating/dc は「rate XX」)。"""
     if _is_rating_mode(pred):
         return f"rate {marks_or_rating}"
     return f"○{marks_or_rating}個"
 
 
 def _horse_score(pred: RacePrediction, horse_id: str) -> int:
-    """rating モードなら horse_ratings から、それ以外は horses.marks_count から。"""
+    """rating/dc モードなら horse_ratings から、onmark なら marks_count から。"""
     if _is_rating_mode(pred):
         h = next((x for x in pred.horse_ratings if x.horse_id == horse_id), None)
         return h.total_rating if h else 0
@@ -580,7 +585,7 @@ def get_historical(_schema_version: str = HISTORICAL_DATA_SCHEMA_VERSION) -> His
 # =====================================================================
 # メイン領域 上部: タイトル + 出馬表アップロード
 # =====================================================================
-st.title("🏇 競馬予想アプリ(本ロジック v1.0)")
+st.title("🏇 競馬予想アプリ(本ロジック v1.2)")
 st.caption("当日の出馬表 CSV をアップロードして「予想実行」を押してください。")
 
 # 別ページ(ロジック説明 等)に遷移しても CSV を保持するため、
@@ -625,6 +630,13 @@ if file_bytes is not None:
         race_card_df = load_race_card_cached(file_bytes, source_name or "uploaded.csv")
     except Exception as e:
         st.error(f"CSV の読み込みに失敗しました: {e}")
+
+# DC 形式の場合は historical 連携を **毎 rerun で実行** する。
+# これにより st.rerun() を跨いでも race_card_df.attrs に dc_match_count /
+# dc_total_count / dc_going が常に保持され、UI のバナー表示が正確になる。
+# (旧コードは予想実行ボタン handler 内でのみ enrich していたため、rerun 後は
+#  attrs が消えて「過去走パターンマッチ 0/0 (0%)」と誤表示されていた)
+# 注: enrich は historical の引き当てがメインで <1 秒なので毎回呼んでも体感影響なし。
 
 # 別ファイルがアップロードされたら、前回の予想結果は破棄
 if file_hash is not None and st.session_state.get("predictions_for_file") != file_hash:
@@ -671,7 +683,7 @@ with st.sidebar:
         st.divider()
 
     st.title("🏇 競馬予想アプリ")
-    st.caption("JRA中央競馬・本ロジック v1.0")
+    st.caption("JRA中央競馬・本ロジック v1.2")
 
     st.markdown(
         """
@@ -783,6 +795,21 @@ with st.sidebar:
 
 
 # =====================================================================
+# DC 形式 v1.2: historical 連携を **毎 rerun で実行**(サイドバーで
+# dc_going が決まった直後)。これで race_card_df.attrs.dc_match_count 等が
+# 常に最新値で保持され、render の banner が正しく描画される。
+# =====================================================================
+if (race_card_df is not None
+        and historical is not None
+        and race_card_df.attrs.get("data_format") == "dc"):
+    from data_loader import enrich_dc_with_historical
+    today_going = st.session_state.get("dc_going", "良")
+    race_card_df = enrich_dc_with_historical(
+        race_card_df, historical.races, today_going=today_going,
+    )
+
+
+# =====================================================================
 # 出馬表のプレビュー & バリデーション
 # =====================================================================
 if race_card_df is not None:
@@ -826,16 +853,12 @@ if race_card_df is not None:
 # =====================================================================
 if race_card_df is not None and historical is not None:
     st.divider()
-    if st.button("🎯 予想実行(本ロジック v1.0)", type="primary", use_container_width=True):
-        # DC 形式の場合は予想前に historical 連携で過去走を補完(v1.2 フルモード)
+    if st.button("🎯 予想実行", type="primary", use_container_width=True):
+        # race_card_df は上の post-sidebar enrich 共通パスで既に補完済み。
+        # cache_hash は馬場切替で予想結果が変わる DC モードのみ going を含める。
         cache_hash = file_hash
         if race_card_df.attrs.get("data_format") == "dc":
-            from data_loader import enrich_dc_with_historical
-            today_going = st.session_state.get("dc_going", "良")
-            race_card_df = enrich_dc_with_historical(
-                race_card_df, historical.races, today_going=today_going,
-            )
-            # cache を 馬場ごとに無効化(同 CSV でも 良/重 で結果が変わる)
+            today_going = race_card_df.attrs.get("dc_going", "良")
             cache_hash = f"{file_hash}_dc_{today_going}"
         all_predictions = predict_all_races_cached(cache_hash, race_card_df, historical)
         st.session_state["all_predictions"] = all_predictions
