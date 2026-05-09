@@ -228,6 +228,140 @@ def load_race_card(
     return df
 
 
+# =====================================================================
+# DC 形式 → historical 連携(v1.2 フルモード化)
+# =====================================================================
+# DC 形式は馬名・騎手・上3F・通過順位を持たないため、過去走パターンマッチで
+# historical/races.parquet 側の horse_id を特定し、欠落フィールドを引き当てる。
+# マッチ失敗馬は元の DC 簡易モード(「馬番 N」表示・TARGET 指数のみ)で運用。
+
+def enrich_dc_with_historical(
+    race_card_df: pd.DataFrame,
+    historical_df: pd.DataFrame,
+    *,
+    today_going: str = "良",
+) -> pd.DataFrame:
+    """
+    DC 形式の race_card_df を historical/races.parquet と照合して、
+    マッチ成功馬には 馬名 / 騎手 / 過去走の上3F・通過順位・馬場 を補完する。
+
+    引数:
+        race_card_df: load_race_card 戻り値。attrs["data_format"]="dc" 想定。
+        historical_df: data/historical/races.parquet を読んだ DataFrame。
+        today_going: 当日馬場(良 / 稍重 / 重 / 不良)。UI ラジオの値。
+                     race_card_df["going"] と past_runs に設定される
+                     (DC は当日馬場を持たないため UI から外部入力)。
+
+    戻り値:
+        enriched race_card_df(コピー、入力は変更しない)
+        attrs:
+          dc_past_runs   ← 過去走 dict も historical 値で再構築
+          dc_match_count ← マッチ成功頭数
+          dc_total_count ← 全頭数
+          dc_going        ← today_going
+    """
+    from utils.horse_matcher import match_all_dc_horses  # 遅延 import で循環回避
+
+    if race_card_df.attrs.get("data_format") != "dc":
+        return race_card_df
+
+    df = race_card_df.copy()
+    # attrs はコピーで失われるので明示再設定
+    df.attrs.update(race_card_df.attrs)
+
+    target_date = str(df["race_date"].iloc[0]) if not df.empty else ""
+    dc_past_runs = dict(df.attrs.get("dc_past_runs", {}))
+
+    # 1) 全馬のマッチング
+    dc_horse_ids = df["horse_id"].astype(str).tolist()
+    matches = match_all_dc_horses(
+        dc_horse_ids, dc_past_runs, historical_df, target_date,
+    )
+
+    # 2) historical を horse_id でひける高速 lookup
+    matched_ids = [m.matched_horse_id for m in matches.values() if m.matched_horse_id]
+    if matched_ids:
+        hist_subset = historical_df[
+            historical_df["horse_id"].astype(str).isin(matched_ids)
+        ].copy()
+    else:
+        hist_subset = historical_df.iloc[0:0].copy()
+
+    # 各馬の最新走情報(馬名・騎手 取得用)
+    if not hist_subset.empty:
+        hist_subset_sorted = hist_subset.sort_values("race_date", ascending=False)
+        latest_per_horse = hist_subset_sorted.drop_duplicates("horse_id", keep="first")
+        latest_per_horse = latest_per_horse.set_index("horse_id")
+    else:
+        latest_per_horse = pd.DataFrame()
+
+    # 各馬の過去 5 走(target_date より前)を historical から取得
+    if not hist_subset.empty:
+        past = hist_subset[hist_subset["race_date"] < target_date].copy()
+        past = past.sort_values("race_date", ascending=False)
+        past_grouped = {hid: g.head(5) for hid, g in past.groupby("horse_id")}
+    else:
+        past_grouped = {}
+
+    # 3) df の各行を更新(マッチ成功馬のみ)
+    new_horse_names: list[str] = []
+    new_jockeys: list[str] = []
+    matched_hist_ids: list[str | None] = []
+    new_past_runs_by_horse: dict[str, list[dict | None]] = {}
+
+    for _, row in df.iterrows():
+        dc_hid = str(row["horse_id"])
+        result = matches.get(dc_hid)
+        if result and result.matched_horse_id and result.matched_horse_id in latest_per_horse.index:
+            hist_hid = result.matched_horse_id
+            latest = latest_per_horse.loc[hist_hid]
+            new_horse_names.append(str(latest.get("horse_name") or row["horse_name"]))
+            new_jockeys.append(str(latest.get("jockey") or "(不明)").strip() or "(不明)")
+            matched_hist_ids.append(hist_hid)
+            # 過去 5 走を historical の dict に変換(rating engine の入力形式に揃える)
+            past_for_horse = past_grouped.get(hist_hid)
+            runs5: list[dict | None] = []
+            if past_for_horse is not None and not past_for_horse.empty:
+                for _, prow in past_for_horse.iterrows():
+                    runs5.append({
+                        "race_date":          str(prow.get("race_date") or ""),
+                        "racecourse":         str(prow.get("racecourse") or ""),
+                        "surface":            str(prow.get("surface") or ""),
+                        "distance":           int(prow["distance"]) if pd.notna(prow.get("distance")) else 0,
+                        "going":              str(prow.get("going") or ""),
+                        "finishing_position": int(prow["finishing_position"]) if pd.notna(prow.get("finishing_position")) else None,
+                        "last_3f":            float(prow["last_3f"]) if pd.notna(prow.get("last_3f")) else None,
+                        "jockey":             str(prow.get("jockey") or "").strip() or "(不明)",
+                        "carry_weight":       float(prow["carry_weight"]) if pd.notna(prow.get("carry_weight")) else None,
+                        "corner_1":           int(prow["corner_1"]) if pd.notna(prow.get("corner_1")) else None,
+                        "corner_2":           int(prow["corner_2"]) if pd.notna(prow.get("corner_2")) else None,
+                        "corner_3":           int(prow["corner_3"]) if pd.notna(prow.get("corner_3")) else None,
+                        "corner_4":           int(prow["corner_4"]) if pd.notna(prow.get("corner_4")) else None,
+                    })
+            while len(runs5) < 5:
+                runs5.append(None)
+            new_past_runs_by_horse[dc_hid] = runs5
+        else:
+            # マッチ失敗 → 元の DC 過去走をそのまま使い、馬名・騎手は据置
+            new_horse_names.append(str(row["horse_name"]))
+            new_jockeys.append("(不明)")
+            matched_hist_ids.append(None)
+            new_past_runs_by_horse[dc_hid] = dc_past_runs.get(dc_hid, [None] * 5)
+
+    df["horse_name"] = new_horse_names
+    df["jockey"] = new_jockeys
+    df["matched_historical_horse_id"] = matched_hist_ids
+    # 当日馬場を全行に設定(rating engine が going を読む)
+    df["going"] = today_going
+
+    # attrs を更新
+    df.attrs["dc_past_runs"] = new_past_runs_by_horse
+    df.attrs["dc_match_count"] = sum(1 for h in matched_hist_ids if h)
+    df.attrs["dc_total_count"] = len(matched_hist_ids)
+    df.attrs["dc_going"] = today_going
+    return df
+
+
 @st.cache_data(show_spinner="出馬表を読み込み中…")
 def load_race_card_cached(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     """
