@@ -38,6 +38,7 @@ from prediction_logic import (
     predict_all_races_cached,
 )
 from utils.recent_runs_renderer import render_recent_runs_matrix
+from utils.loading_overlay import render_running_horse_overlay
 from utils.training_data import (
     match_training_to_horses,
     parse_training_csv,
@@ -1340,41 +1341,55 @@ if race_card_df is not None:
 if race_card_df is not None and historical is not None:
     st.divider()
     if st.button("🎯 予想実行", type="primary", use_container_width=True):
-        # race_card_df は上の post-sidebar enrich 共通パスで既に補完済み。
-        # cache_hash は馬場切替で予想結果が変わる DC モードのみ going を含める。
-        cache_hash = file_hash
-        if race_card_df.attrs.get("data_format") == "dc":
-            today_going = race_card_df.attrs.get("dc_going", "良")
-            cache_hash = f"{file_hash}_dc_{today_going}"
+        # v1.6: 走る馬オーバーレイで体感ストレスを緩和。`st.empty()` の
+        # placeholder に overlay を表示し、計算完了後に空にして消す。
+        overlay_placeholder = st.empty()
+        with overlay_placeholder.container():
+            render_running_horse_overlay(
+                "予想を計算中…",
+                "馬たちが走っています 🏇",
+            )
 
-        # v1.5: 坂路調教 CSV があれば事前にパース + マッチして cached に渡す。
-        training_match: dict[str, dict] = {}
-        training_hash_str = ""
-        if training_bytes is not None:
-            try:
-                training_df = parse_training_csv(training_bytes)
-                target_date = ""
-                if not race_card_df.empty:
-                    target_date = str(race_card_df["race_date"].iloc[0])
-                training_match = match_training_to_horses(
-                    training_df, race_card_df, target_date=target_date,
-                )
-                training_hash_str = st.session_state.get(SS_TRAINING_HASH, "")
-            except Exception as e:
-                st.warning(f"坂路調教 CSV の解析でエラー: {e}(F4/F5 評価はスキップ)")
-                training_match = {}
-                training_hash_str = ""
+        try:
+            # race_card_df は上の post-sidebar enrich 共通パスで既に補完済み。
+            # cache_hash は馬場切替で予想結果が変わる DC モードのみ going を含める。
+            cache_hash = file_hash
+            if race_card_df.attrs.get("data_format") == "dc":
+                today_going = race_card_df.attrs.get("dc_going", "良")
+                cache_hash = f"{file_hash}_dc_{today_going}"
 
-        # 統計を session_state に保存(バナー表示用)
-        st.session_state["training_match_count"] = len(training_match)
+            # v1.5: 坂路調教 CSV があれば事前にパース + マッチして cached に渡す。
+            training_match: dict[str, dict] = {}
+            training_hash_str = ""
+            if training_bytes is not None:
+                try:
+                    training_df = parse_training_csv(training_bytes)
+                    target_date = ""
+                    if not race_card_df.empty:
+                        target_date = str(race_card_df["race_date"].iloc[0])
+                    training_match = match_training_to_horses(
+                        training_df, race_card_df, target_date=target_date,
+                    )
+                    training_hash_str = st.session_state.get(SS_TRAINING_HASH, "")
+                except Exception as e:
+                    st.warning(f"坂路調教 CSV の解析でエラー: {e}(F4/F5 評価はスキップ)")
+                    training_match = {}
+                    training_hash_str = ""
 
-        all_predictions = predict_all_races_cached(
-            cache_hash, race_card_df, historical,
-            training_hash=training_hash_str,
-            _training_match=training_match if training_match else None,
-        )
-        st.session_state["all_predictions"] = all_predictions
-        st.session_state["predictions_for_file"] = cache_hash
+            # 統計を session_state に保存(バナー表示用)
+            st.session_state["training_match_count"] = len(training_match)
+
+            all_predictions = predict_all_races_cached(
+                cache_hash, race_card_df, historical,
+                training_hash=training_hash_str,
+                _training_match=training_match if training_match else None,
+            )
+            st.session_state["all_predictions"] = all_predictions
+            st.session_state["predictions_for_file"] = cache_hash
+        finally:
+            # 計算が成功しても例外でも overlay は必ず消す
+            overlay_placeholder.empty()
+
         # サイドバーは script の先頭付近で描画されるので、その時点で
         # session_state["all_predictions"] を読めるよう即座に rerun する。
         # (予想実行ボタンはサイドバーより後ろにあるため、この rerun を挟まないと
@@ -1421,14 +1436,39 @@ def _main_predictions_fragment(
     行わない**(StreamlitAPIException の原因)。`render_predictions_section`
     は内部的に st.expander / st.markdown 等のメイン scope widget だけを
     呼ぶので、単一 scope ルールを満たす。
+
+    v1.6: 競馬場フィルタが直前と異なる場合は走る馬オーバーレイを表示し、
+    描画完了後に消す。`render_predictions_section` 内の 34 レース DOM 構築
+    に数百 ms 〜 1 秒かかるため、その間視覚的に「動いている」感を出す。
     """
-    render_predictions_section(
-        all_predictions=all_predictions,
-        race_card_df=race_card_df,
-        display_df=display_df,
-        selected_course=selected_course,
-        historical_races=historical_races,
+    last_course = st.session_state.get("_last_rendered_course")
+    course_changed = (
+        last_course is not None and last_course != selected_course
     )
+
+    overlay_placeholder = st.empty()
+    if course_changed:
+        course_label = (
+            "全レース" if selected_course == "全場" else f"{selected_course}"
+        )
+        with overlay_placeholder.container():
+            render_running_horse_overlay(
+                f"{course_label} のレースを準備中…",
+                "🏇 もうすぐ揃います",
+            )
+
+    try:
+        render_predictions_section(
+            all_predictions=all_predictions,
+            race_card_df=race_card_df,
+            display_df=display_df,
+            selected_course=selected_course,
+            historical_races=historical_races,
+        )
+    finally:
+        # 描画が終わったら overlay を消す
+        overlay_placeholder.empty()
+        st.session_state["_last_rendered_course"] = selected_course
 
 
 if (predictions_in_session is not None
