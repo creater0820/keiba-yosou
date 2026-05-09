@@ -41,6 +41,8 @@ from utils.recent_runs_renderer import render_recent_runs_matrix
 from utils.loading_overlay import (
     render_running_horse_overlay,
     trigger_overlay_inline,
+    diagnostic_force_show,
+    diagnostic_status,
 )
 from utils.training_data import (
     match_training_to_horses,
@@ -1134,6 +1136,28 @@ with st.sidebar:
 
     # サイドバーのタイトル + 「使い方」説明は個人運用フェーズ移行に伴い削除。
     # メインエリア上部の st.title「🏇 競馬予想アプリ(本ロジック v1.4)」は残す。
+
+    # ---------- v1.6.5 診断 UI(原因特定後 v1.7 で削除予定)----------
+    if st.checkbox(
+        "🔧 診断モード(走る馬 overlay)",
+        value=False,
+        key="_diag_overlay",
+        help=(
+            "v1.6.5 限定の診断機能。画面右下に「overlay: ready」バッジが"
+            "出ていれば JS 注入は成功しています。"
+        ),
+    ):
+        st.caption(
+            "**手順**: \n"
+            "1. 右下のバッジに `overlay: ready` 等が出ているか確認 \n"
+            "2. 下のボタンで馬を強制表示 → 馬が画面を走るか目視 \n"
+            "3. 「listener 状況確認」で `installed=true` か確認"
+        )
+        if st.button("🐎 馬を強制表示テスト", key="_diag_force"):
+            diagnostic_force_show()
+        if st.button("📡 listener 状況確認", key="_diag_status"):
+            diagnostic_status()
+        st.divider()
 
     if race_card_df is not None and "racecourse" in race_card_df.columns:
         st.divider()
