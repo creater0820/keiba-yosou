@@ -38,7 +38,10 @@ from prediction_logic import (
     predict_all_races_cached,
 )
 from utils.recent_runs_renderer import render_recent_runs_matrix
-from utils.loading_overlay import render_running_horse_overlay
+from utils.loading_overlay import (
+    render_running_horse_overlay,
+    trigger_overlay_inline,
+)
 from utils.training_data import (
     match_training_to_horses,
     parse_training_csv,
@@ -1348,10 +1351,12 @@ if race_card_df is not None:
 if race_card_df is not None and historical is not None:
     st.divider()
     if st.button("🎯 予想実行", type="primary", use_container_width=True):
-        # v1.6.2: overlay 表示は CSS が `body:has([data-test-script-state=
-        # "running"])` で自動制御するため、Python 側では何もしない。
-        # ボタン押下 → rerun 開始(暗転)と同時に overlay が表示され、
-        # 描画完了で消える。
+        # v1.6.4: JS event listener(capture phase の click)で showOverlay
+        # は既に呼ばれているはずだが、何らかの理由で listener が発火しない
+        # ケースに備えて、Python 側からも `window.__showHorseOverlay()` を
+        # 即時呼び出して保険をかける。状態機械の早期 return で二重発火
+        # しても無害(state !== IDLE で ignored)。
+        trigger_overlay_inline()
 
         # race_card_df は上の post-sidebar enrich 共通パスで既に補完済み。
         # cache_hash は馬場切替で予想結果が変わる DC モードのみ going を含める。
