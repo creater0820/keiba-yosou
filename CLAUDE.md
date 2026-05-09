@@ -440,11 +440,25 @@ keiba-yosou/
   `searchsorted` で O(log N) 化し 91% 短縮、(3) `_build_horse_mark_data` /
   `predict_race_dc` / `get_last_finishing_positions` の各 `iterrows` も
   `to_dict("records")` 化。
-- **v1.6 UX**(現行、2026-05): 走る馬ローディング演出を追加。
-  予想実行ボタン押下時と競馬場フィルタ切替時に、`utils/loading_overlay.py`
-  の `render_running_horse_overlay()` で **inline SVG + CSS keyframes** の
-  半透明オーバーレイを表示し、計算完了後 placeholder.empty() で除去する。
-  外部 CDN / GIF 依存ゼロ(全 4KB)、`prefers-reduced-motion` 対応で静止
-  代替も用意。フィルタ切替は session_state["_last_rendered_course"] で
-  変化検知し、変わった時だけ overlay を出す。@st.fragment scope を壊さない
-  (single-scope 維持)。
+- **v1.6 UX**(2026-05): 走る馬ローディング演出を追加(初版)。
+  `st.empty()` placeholder + `st.markdown` で SVG/CSS を流し込む方式。
+  ただし placeholder は Streamlit のメイン描画領域に属するため、rerun の
+  暗転中は overlay が消えており、**描画完了直前 1 秒だけしか馬が見えない**
+  問題があった(v1.6.1 で MutationObserver による検知も試みたが、新 DOM
+  注入後にしか発火せず根本解決にならず)。
+- **v1.6.2 UX**(現行、2026-05): overlay を **CSS-first 方式** に再々書き
+  換え。JS で 1 度だけ `document.head` に `<style>`、`document.body` 直下
+  に `<div id="custom-loading-overlay">` を注入(`__horseOverlayInstalled`
+  フラグで二重注入防止)。表示制御は CSS の属性セレクタのみで実施:
+    `body:has([data-test-script-state="running"]) #custom-loading-overlay`
+    `body:has([data-test-script-state="rerunRequested"]) ...`
+    `body:has([data-stale="true"]) ...`
+    `body:has([data-testid="stStatusWidget"]) ...`
+  これで **rerun の暗転と同時に overlay が表示** され、Streamlit が ready
+  状態に戻った瞬間に消える(ブラウザネイティブ速度、JS observer 介在
+  なし)。`:has()` 非対応ブラウザ向けに最小 MutationObserver で
+  `body.__streamlit-running` クラスを toggle する fallback も併設。
+  z-index は 2147483647(int 最大値)で純正暗転より上、SVG/CSS/JS 合計
+  6.8 KB の inline 注入で外部 CDN 依存ゼロ。`app.py` 側は
+  `set_page_config` 直後に `render_running_horse_overlay()` を 1 回呼ぶ
+  だけで、placeholder / fragment 内の overlay 制御コードは全削除。
