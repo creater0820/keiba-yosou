@@ -424,6 +424,69 @@ def test_build_matrix_html_accepts_dataclass_predictions():
 
 
 # ==================================================================
+# v1.7.2: 直近10走戦歴マトリクスのヘッダ + データ列が 10 で揃うこと
+# (v1.7.1 でヘッダが空欄のままだった事故の再発防止)
+# ==================================================================
+def test_matrix_header_has_10_labeled_columns():
+    """`<thead>` 内の `<th>` ラベルが 10 走分すべて表示されていること。
+
+    v1.7.1 でヘッダ列を 10 列に拡張したが、Streamlit の cache key に schema
+    version が含まれず古い HTML が cache hit して 6〜10 走前のラベルが空欄
+    のまま実機表示されていた事故への再発防止。
+    """
+    import pandas as pd
+    from prediction_logic import HorsePrediction
+    from utils.recent_runs_renderer import (
+        _build_matrix_html, RECENT_RUN_COUNT, RECENT_RUN_HEADERS,
+    )
+    assert RECENT_RUN_COUNT == 10
+    # ['', '前走', '2走前', ..., '10走前']
+    assert RECENT_RUN_HEADERS[0] == ""
+    assert RECENT_RUN_HEADERS[1] == "前走"
+    for i in range(2, 11):
+        assert RECENT_RUN_HEADERS[i] == f"{i}走前", \
+            f"{i} 番目のヘッダラベル不一致"
+
+    rc = pd.DataFrame({
+        "horse_id": ["H1"], "horse_name": ["馬A"], "horse_number": [1],
+        "race_date": ["2026-05-09"], "surface": ["芝"], "distance": [1400],
+        "jockey": ["武豊"],
+    })
+    rc.attrs["dc_past_runs"] = {"H1": [None] * 5}  # 短い過去走でも OK
+    preds = [HorsePrediction(
+        horse_id="H1", horse_name="馬A", jockey="武豊",
+        score=5.0, mark="◎", reasons=[],
+    )]
+    html = _build_matrix_html(rc, preds, pd.DataFrame())
+
+    # ヘッダ全 10 走前ラベルが含まれている
+    for i in range(2, 11):
+        assert f"{i}走前" in html, f"{i}走前 のヘッダラベルが含まれていない"
+    assert "前走" in html
+
+    # `<thead>` 内の `<th>` 数 = 11(空馬番列 + 10 走分)
+    thead_start = html.find("<thead>")
+    thead_end = html.find("</thead>", thead_start)
+    assert thead_start >= 0 and thead_end > thead_start
+    thead_section = html[thead_start:thead_end]
+    th_count = thead_section.count("<th>")
+    assert th_count == 11, (
+        f"<thead> 内の <th> 数が {th_count} で、期待値 11 と異なる"
+    )
+
+
+def test_matrix_renderer_schema_version_present():
+    """v1.7.2: cache invalidation 用の RENDERER_SCHEMA_VERSION が定義されて
+    いて、空文字 でないこと。app.py 側がこれを cache_key に含める設計。
+    """
+    from utils.recent_runs_renderer import RENDERER_SCHEMA_VERSION
+    assert isinstance(RENDERER_SCHEMA_VERSION, str)
+    assert len(RENDERER_SCHEMA_VERSION) > 0
+    # スキーマ変更時は bump 必須(現行は v2-10runs)
+    assert "10runs" in RENDERER_SCHEMA_VERSION or "v2" in RENDERER_SCHEMA_VERSION
+
+
+# ==================================================================
 # 単体実行用ランナー(他テストと同じパターン)
 # ==================================================================
 def _all_tests():

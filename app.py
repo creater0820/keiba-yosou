@@ -883,9 +883,17 @@ def render_predictions_section(
                 # perf: マトリクス HTML はレース毎に同一(predictions 不変)
                 # なので file_hash + going + race_id で cache key を組む。
                 # これで競馬場フィルタ切替の rerun では再構築されない。
+                # v1.7.2: cache_key に renderer の RENDERER_SCHEMA_VERSION を
+                # 含めて、ヘッダ仕様変更時に旧キャッシュ HTML を自動無効化。
+                # (v1.7.1 で 10 列にしたが schema version 不在で古いキャッシュ
+                # が cache hit して 5 列ヘッダが残る問題への対策)
+                from utils.recent_runs_renderer import RENDERER_SCHEMA_VERSION
                 _file_hash = st.session_state.get("uploaded_csv_hash", "")
                 _going = race_card_df.attrs.get("dc_going", "良")
-                _matrix_key = f"matrix_{_file_hash}_{_going}_{race_id}"
+                _matrix_key = (
+                    f"matrix_{RENDERER_SCHEMA_VERSION}"
+                    f"_{_file_hash}_{_going}_{race_id}"
+                )
                 render_recent_runs_matrix(
                     race_card_for_this, pseudo_preds, historical_races,
                     cache_key=_matrix_key,

@@ -26,6 +26,29 @@ from utils.race_history import get_recent_runs_for_race
 
 
 # =====================================================================
+# Renderer スキーマバージョン(v1.7.2)
+# =====================================================================
+# v1.7.1 でヘッダ + データ列を 5 → 10 に拡張したが、`@st.cache_data` の
+# キャッシュキーに schema version が含まれていなかったため、Streamlit が
+# 5 走時代に生成された古い HTML を cache hit で返し続けていた。
+# このバージョン文字列を cache_key の一部として呼び出し側が組むことで、
+# スキーマ変更時に **自動的に古いキャッシュを無効化** する。
+# 以降ヘッダ仕様や HTML 構造を変える時はこの文字列を bump する。
+RENDERER_SCHEMA_VERSION = "v2-10runs"
+
+
+# 直近 N 走の表示列数(ヘッダ + データ両方の単一情報源)
+RECENT_RUN_COUNT = 10
+
+# ヘッダラベル: ['', '前走', '2走前', '3走前', ..., '10走前']
+# 先頭の空文字列は馬番ラベル列の `<th>`
+RECENT_RUN_HEADERS: list[str] = [""] + [
+    "前走" if i == 1 else f"{i}走前"
+    for i in range(1, RECENT_RUN_COUNT + 1)
+]
+
+
+# =====================================================================
 # 表示用の色・マーク定数(マジックナンバー禁止)
 # =====================================================================
 # 緑文字の色値(Tailwind green-500 相当)
@@ -480,23 +503,25 @@ def _build_matrix_html(
     horse_ids_tuple = tuple(m[0] for m in horse_meta)
     dc_past_runs = race_card_df.attrs.get("dc_past_runs")
     if dc_past_runs:
-        history = {hid: dc_past_runs.get(hid, [None] * 10) for hid in horse_ids_tuple}
+        history = {
+            hid: dc_past_runs.get(hid, [None] * RECENT_RUN_COUNT)
+            for hid in horse_ids_tuple
+        }
     else:
         history = get_recent_runs_for_race(
-            horse_ids_tuple, target_date_iso, historical_df, n=10
+            horse_ids_tuple, target_date_iso, historical_df,
+            n=RECENT_RUN_COUNT,
         )
 
     # ----- HTML 組み立て -----
+    # v1.7.2: ヘッダ生成を `RECENT_RUN_HEADERS` 定数経由にしてハードコード
+    # を撤廃。ヘッダ列数とデータ列数を `RECENT_RUN_COUNT = 10` で単一情報源化。
     parts: list[str] = [_MATRIX_CSS, '<table class="recent-runs-matrix">']
-    parts.append(
-        "<thead><tr><th></th>"
-        "<th>前走</th><th>2走前</th><th>3走前</th><th>4走前</th><th>5走前</th>"
-        "<th>6走前</th><th>7走前</th><th>8走前</th><th>9走前</th><th>10走前</th>"
-        "</tr></thead><tbody>"
-    )
+    thead_inner = "".join(f"<th>{h}</th>" for h in RECENT_RUN_HEADERS)
+    parts.append(f"<thead><tr>{thead_inner}</tr></thead><tbody>")
 
     for hid, mark, hn, name, _score in horse_meta:
-        runs = history.get(hid, [None] * 10)
+        runs = history.get(hid, [None] * RECENT_RUN_COUNT)
         # runs は [前走, 2走前, ..., 10走前] の直近順。表示も同じく左=前走、右=10走前。
         # 新聞・専門紙の戦歴と同じ並びで「直近の調子」を左端で素早く読める。
 
@@ -511,10 +536,12 @@ def _build_matrix_html(
             today_jockey=today_jockey,
             jockey_changed=jockey_changed,
         )
-        # 10 列固定で表示するため、runs を必ず長さ 10 にパディング
+        # 表示列数固定(RECENT_RUN_COUNT)に合わせて runs をパディング/切詰め
         # (新馬や DC マッチ失敗で短い場合でも表崩れを防ぐ)
-        runs_padded = list(runs) + [None] * (10 - len(runs))
-        runs_padded = runs_padded[:10]
+        runs_padded = (
+            list(runs)
+            + [None] * max(0, RECENT_RUN_COUNT - len(runs))
+        )[:RECENT_RUN_COUNT]
 
         parts.append("<tr>")
         parts.append(f'<td class="horse-label">{label}</td>')
