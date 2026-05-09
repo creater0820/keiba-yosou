@@ -1,56 +1,60 @@
 """
-ローディング中の「走る馬」オーバーレイ演出(v1.6.4 — 状態機械 + 最小表示時間)。
+ローディング中の「走る馬」オーバーレイ演出(v1.6.5 — 診断版)。
 
-【経緯】
-- v1.6.0: `st.empty()` placeholder 方式 → rerun 中に消えて終盤チラ見えだけ
-- v1.6.1: MutationObserver で DOM 注入を検知 → 新 DOM 後にしか発火せず同じ
-- v1.6.2: CSS-first(`body:has([data-test-script-state="running"])`)
-          → ページロード時 / 何でもない瞬間にも常時表示する致命バグ
-- v1.6.3: ホワイトリスト方式(予想実行ボタン + 競馬場ラジオの click 検出)
-          → click 自体が listener に届かない / 即座に hide される問題
-- **v1.6.4(本実装)**: 状態機械 + 最小表示時間 800ms + 多重イベント検出
-          + capture phase + DEBUG ログ + Python 側フォールバック
+【主因仮説の確定】
+Streamlit 1.30+(本プロジェクト 1.57.0)では `st.markdown(unsafe_allow_html=
+True)` 経由の `<script>` タグはサニタイザで除去 / 実行されない仕様変更が
+入った。v1.6.0〜v1.6.4 の overlay 注入が実機で機能しなかった根本原因は
+ほぼこれ。診断のため v1.6.5 では以下を全て同時投入する:
 
-【設計】
-1. **状態機械**: IDLE → SHOWN → MIN_TIME_PASSED → RUNNING_DETECTED → IDLE
-   - 最低 800ms は必ず表示(点滅して見えない問題を回避)
-   - running を観測しないままなら 5 秒で safety hide
-   - running を観測したら running 終了まで hide しない
+1. **`components.html()` 経路一本化**:
+   `streamlit.components.v1.html(..., height=0)` で 0px の不可視 iframe を
+   作り、その中で実行された `<script>` から `window.parent.document` に
+   overlay を注入する。Streamlit が公式に保証する script 実行経路。
 
-2. **イベント検出を多重化**:
-   - `click` / `change` / `pointerdown` を **capture phase** で attach
-     → React の `stopPropagation()` を回避(capture は React より先に発火)
-   - ボタンテキストは whitespace 除去で「予想実行」マッチ(emoji 🎯 や
-     全角空白に対応)
-   - ラジオは `<input type="radio">` / `<label>` 親 / `[role="radio"]` /
-     `[data-baseweb="radio"]` を全網羅
-   - 競馬場フィルタかは親グループのテキストに「競馬場」を含むかで判定
+2. **可視デバッグバッジ**:
+   画面右下に `#horse-debug-badge` を常時表示し、JS の各段階で textContent
+   を更新する(`ready` / `click@btn` / `SHOWN` / `RUNNING_DETECTED` 等)。
+   お父様が DevTools を開かなくても、画面の右下を見るだけで「どこまで
+   動いているか」が判別できる。
 
-3. **iframe 両対応**: `parent.document` を try で取得し、不可なら
-   `document` にフォールバック。両方が同一 origin なら listener も両方に
-   attach する案も検討したが、二重発火リスクのため doc 1 つに絞る。
+3. **DEBUG=True デフォルト**:
+   `console.log('[HorseOverlay]', ...)` を強制出力。インストール証明 +
+   iframe 検出 + CSP テスト + DOM 要素カウントを 1 度に出力。
 
-4. **DEBUG ログ**: `console.log('[HorseOverlay]', ...)` で各段階を出力。
-   実機 DevTools で「どこで止まっているか」を即座に判断可能。
-   本番運用では `_DEBUG_DEFAULT` を `False` にして抑制(必要時に True)。
+4. **5 階層 textContent 検査**:
+   仮想スクロール対策として、クリック要素から親方向に 5 階層遡って
+   textContent を結合し「予想実行」「競馬場」を含むかチェック。
 
-5. **Python 側フォールバック**: 予想実行ボタン押下時に
-   `<script>window.__showHorseOverlay && window.__showHorseOverlay()</script>`
-   を打って JS 経路が死んでいる時の保険を確保。状態機械の早期 return で
-   二重発火しても無害。
+5. **document + parent.document 両方に listener attach**:
+   どちらの context でクリックが発火するか不明なので両方仕掛ける。
 
-API:
-- render_running_horse_overlay(message, sub_message, debug=None)
-    Streamlit script の **冒頭で 1 度だけ呼ぶ**。`__horseOverlayInstalled`
-    フラグで二重注入防止。後続 rerun では JS が早期 return。
-- trigger_overlay_inline(message=None)
-    Python 側から `window.__showHorseOverlay()` を呼び出すヘルパ。
-    予想実行ボタン押下時の保険として利用。
+6. **診断用強制表示 API**:
+   `window.parent.__showHorseOverlay()` でいつでも overlay を表示可能。
+   サイドバーの「🔧 診断モード → 馬を強制表示テスト」ボタンから呼ぶ。
+
+【期待される父の確認手順】
+1. アプリを開く → 画面右下に **黒い小さなバッジ** が見えるか
+   - 見えない → JS 自体が動いていない(CSP / iframe sandbox 等)
+   - `overlay: ready` と表示される → JS インストール成功
+2. サイドバーの「🔧 診断モード」をチェック → 「馬を強制表示テスト」を押す
+   - 馬が出る → 注入は OK、残るは「click イベントが届いていない」
+   - 馬が出ない → CSS / overlay 要素の場所問題
+3. 「予想実行」ボタンを押した瞬間、右下バッジが `click@btn` に変わるか
+   - 変わる → イベントは捕捉されている、状態機械の問題
+   - 変わらない → React で stopPropagation されている可能性
+
+【厳守事項】
+- ロジック v1.5 不変
+- session_state 既存キー破壊禁止
+- ページロード時に overlay は **絶対に表示しない**(バッジは出す)
+- 診断 UI は v1.6.5 限定、原因特定後 v1.7 で削除予定
 """
 
 from __future__ import annotations
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # ---------------------------------------------------------------------------
@@ -79,10 +83,6 @@ _HORSE_SVG = """
 """.strip()
 
 
-# ---------------------------------------------------------------------------
-# CSS — `is-visible` クラスで明示的に表示制御(CSS-first :has() 方式は
-# 廃止。常時表示の事故を絶対起こさないため、表示は JS が ON/OFF する)
-# ---------------------------------------------------------------------------
 _OVERLAY_CSS = """
 #custom-loading-overlay {
     display: none;
@@ -103,7 +103,6 @@ _OVERLAY_CSS = """
 #custom-loading-overlay.is-visible {
     display: flex !important;
 }
-
 #custom-loading-overlay .running-horse-svg {
     animation: hov-gallop-translate 2.4s linear infinite,
                hov-gallop-bounce    0.4s ease-in-out infinite;
@@ -117,7 +116,6 @@ _OVERLAY_CSS = """
     0%, 100% { margin-top: 0; }
     50%      { margin-top: -8px; }
 }
-
 #custom-loading-overlay .leg { transform-origin: top center; }
 #custom-loading-overlay .leg-front-r { animation: hov-leg-a 0.4s linear infinite; }
 #custom-loading-overlay .leg-front-l { animation: hov-leg-b 0.4s linear infinite; }
@@ -131,7 +129,6 @@ _OVERLAY_CSS = """
     0%, 100% { transform: rotate(-25deg); }
     50%      { transform: rotate( 25deg); }
 }
-
 #custom-loading-overlay .horse-tail {
     transform-origin: 45px 60px;
     animation: hov-tail-wave 0.6s ease-in-out infinite;
@@ -140,7 +137,6 @@ _OVERLAY_CSS = """
     0%, 100% { transform: rotate(-6deg); }
     50%      { transform: rotate( 6deg); }
 }
-
 #custom-loading-overlay .running-horse-message {
     margin-top: 1.4em;
     font-size: 1.4em;
@@ -168,6 +164,26 @@ _OVERLAY_CSS = """
     transform: translateY(40px);
 }
 
+/* === v1.6.5 診断バッジ(画面右下に常時表示)=== */
+#horse-debug-badge {
+    position: fixed;
+    bottom: 8px;
+    right: 8px;
+    background: #1a1a1a;
+    color: #66ff66;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    z-index: 2147483646;
+    opacity: 0.85;
+    pointer-events: none;
+    border: 1px solid #444;
+    line-height: 1.4;
+    max-width: 320px;
+    word-break: break-all;
+}
+
 @media (prefers-reduced-motion: reduce) {
     #custom-loading-overlay .running-horse-svg,
     #custom-loading-overlay .running-horse-svg * {
@@ -175,7 +191,6 @@ _OVERLAY_CSS = """
         margin-top: 0 !important;
     }
 }
-
 @media (max-width: 480px) {
     #custom-loading-overlay .running-horse-svg { width: 110px; height: 70px; }
     #custom-loading-overlay .running-horse-message { font-size: 1.1em; }
@@ -184,51 +199,76 @@ _OVERLAY_CSS = """
 
 
 # ---------------------------------------------------------------------------
-# JS インストーラ:状態機械 + 最小表示時間 + capture phase event listener
+# JS インストーラ:components.html(iframe)から window.parent.document に注入
 # ---------------------------------------------------------------------------
-# `__DEBUG__` プレースホルダで debug=True/False を埋め込む。
 _INSTALLER_JS_TEMPLATE = """
 (function() {
     const DEBUG = __DEBUG__;
     function log() {
         if (!DEBUG) return;
-        try { console.log.apply(console, ['[HorseOverlay]'].concat(
-            Array.prototype.slice.call(arguments))); } catch(e){}
+        try {
+            console.log.apply(
+                console,
+                ['[HorseOverlay]'].concat(
+                    Array.prototype.slice.call(arguments)
+                )
+            );
+        } catch(e){}
     }
 
-    // === doc 解決:iframe 両対応 ===
-    let doc;
-    let usingParent = false;
+    // === doc 解決:components.html は iframe で実行されるので必ず parent ===
+    let doc = null;
+    let docKind = '?';
     try {
         if (window.parent && window.parent !== window
                 && window.parent.document) {
             doc = window.parent.document;
-            usingParent = true;
-        } else {
-            doc = document;
+            docKind = 'parent';
         }
     } catch (e) {
-        doc = document;
-        log('parent.document blocked, using document', e && e.message);
+        log('parent.document blocked:', e && e.message);
     }
-    log('installed at', new Date().toISOString(),
-        'doc:', usingParent ? 'parent' : 'self');
+    if (!doc) {
+        // フォールバック: 最後の手段として self
+        doc = document;
+        docKind = 'self';
+    }
+    log('=== install start ===');
+    log('doc kind:', docKind);
+    log('window === window.parent:', window === window.parent);
+    log('navigator.userAgent:', navigator.userAgent);
 
-    // 二重注入防止(同一 doc で 1 回のみ)
+    // 二重注入防止フラグ
     if (doc.__horseOverlayInstalled) {
-        log('already installed, skipping');
+        log('already installed via', doc.__horseOverlayInstalledVia,
+            ', skipping new install');
         return;
     }
     doc.__horseOverlayInstalled = true;
+    doc.__horseOverlayInstalledVia = 'components.html';
+
+    // === 環境調査ログ ===
+    log('document.body exists:', !!doc.body);
+    try {
+        log('CSP test (eval):', (function(){
+            try { eval('1'); return 'OK'; } catch(e){ return 'BLOCKED'; }
+        })());
+    } catch(e){}
+    try {
+        log('matched elements: button=' + doc.querySelectorAll('button').length
+            + ', input[radio]=' + doc.querySelectorAll('input[type=\"radio\"]').length
+            + ', role-radio=' + doc.querySelectorAll('[role=\"radio\"]').length
+            + ', baseweb-radio=' + doc.querySelectorAll('[data-baseweb=\"radio\"]').length);
+    } catch(e){}
 
     // === ① <head> に <style> ===
-    const style = doc.createElement('style');
+    var style = doc.createElement('style');
     style.id = 'custom-loading-overlay-css';
     style.textContent = `__OVERLAY_CSS__`;
     doc.head.appendChild(style);
 
     // === ② <body> 直下に overlay 要素 ===
-    const overlay = doc.createElement('div');
+    var overlay = doc.createElement('div');
     overlay.id = 'custom-loading-overlay';
     overlay.setAttribute('role', 'status');
     overlay.setAttribute('aria-live', 'polite');
@@ -240,22 +280,30 @@ _INSTALLER_JS_TEMPLATE = """
         <div class="running-horse-sub">__SUB_MESSAGE__</div>
     `;
     doc.body.appendChild(overlay);
-    log('overlay element injected');
+
+    // === ③ 診断バッジ(画面右下に常時表示)===
+    var badge = doc.createElement('div');
+    badge.id = 'horse-debug-badge';
+    badge.textContent = 'overlay: ready (' + docKind + ')';
+    doc.body.appendChild(badge);
+    log('overlay + badge injected');
+
+    function setBadge(text) {
+        try { badge.textContent = 'overlay: ' + text; } catch(e){}
+        log('badge → ' + text);
+    }
 
     // === 状態機械 ===
-    const STATE = {
-        IDLE: 0,
-        SHOWN: 1,
-        MIN_TIME_PASSED: 2,
-        RUNNING_DETECTED: 3,
+    var STATE = {
+        IDLE: 0, SHOWN: 1, MIN_TIME_PASSED: 2, RUNNING_DETECTED: 3,
     };
-    let state = STATE.IDLE;
-    let shownAt = 0;
-    let runObserver = null;
-    let safetyTimer = null;
-    let minTimeTimer = null;
+    var state = STATE.IDLE;
+    var shownAt = 0;
+    var runObserver = null;
+    var safetyTimer = null;
+    var minTimeTimer = null;
 
-    function showOverlay() {
+    function showOverlay(reason) {
         if (state !== STATE.IDLE) {
             log('showOverlay ignored, state=', state);
             return;
@@ -263,22 +311,20 @@ _INSTALLER_JS_TEMPLATE = """
         state = STATE.SHOWN;
         shownAt = Date.now();
         overlay.classList.add('is-visible');
-        log('showOverlay → SHOWN');
+        setBadge('SHOWN(' + (reason || '?') + ')');
 
-        // 最小表示時間 800ms
         clearTimeout(minTimeTimer);
         minTimeTimer = setTimeout(function() {
             if (state === STATE.SHOWN) {
                 state = STATE.MIN_TIME_PASSED;
-                log('min time passed (800ms) → MIN_TIME_PASSED');
+                setBadge('MIN_TIME_PASSED');
                 tryHide();
             }
         }, 800);
 
-        // running 状態の監視
         if (runObserver) try { runObserver.disconnect(); } catch(e){}
         runObserver = new MutationObserver(function() {
-            const running = doc.querySelector(
+            var running = doc.querySelector(
                 '[data-test-script-state="running"],'
                 + '[data-test-script-state="rerunRequested"],'
                 + '[data-stale="true"],'
@@ -286,9 +332,9 @@ _INSTALLER_JS_TEMPLATE = """
             );
             if (running && state < STATE.RUNNING_DETECTED) {
                 state = STATE.RUNNING_DETECTED;
-                log('running detected, will keep overlay until done');
+                setBadge('RUNNING_DETECTED');
             } else if (!running && state === STATE.RUNNING_DETECTED) {
-                log('running ended');
+                setBadge('running ended');
                 tryHide();
             }
         });
@@ -299,9 +345,9 @@ _INSTALLER_JS_TEMPLATE = """
                 'data-test-script-state', 'data-stale', 'data-testid',
             ],
         });
-        // 即時 1 回チェック(showOverlay 直後に既に running の可能性)
+        // 即時 1 回チェック
         setTimeout(function() {
-            const r = doc.querySelector(
+            var r = doc.querySelector(
                 '[data-test-script-state="running"],'
                 + '[data-test-script-state="rerunRequested"],'
                 + '[data-stale="true"],'
@@ -309,42 +355,32 @@ _INSTALLER_JS_TEMPLATE = """
             );
             if (r && state < STATE.RUNNING_DETECTED) {
                 state = STATE.RUNNING_DETECTED;
-                log('running detected (initial check)');
+                setBadge('RUNNING_DETECTED (initial)');
             }
         }, 50);
 
-        // safety timer: 30 秒で必ず hide(暴走防止)
         clearTimeout(safetyTimer);
         safetyTimer = setTimeout(function() {
-            log('safety hide (30s elapsed)');
+            setBadge('safety hide (30s)');
             forceHide();
         }, 30000);
     }
 
     function tryHide() {
-        const elapsed = Date.now() - shownAt;
-        if (elapsed < 800) {
-            log('tryHide: still under min time (' + elapsed + 'ms)');
-            return;
-        }
+        var elapsed = Date.now() - shownAt;
+        if (elapsed < 800) return;
         if (state === STATE.RUNNING_DETECTED) {
-            // running は監視中。MutationObserver が「ended」を見たら
-            // また tryHide が呼ばれる。ここでは何もしない。
+            // observer の running ended 通知待ち
             return;
         }
         if (state === STATE.MIN_TIME_PASSED) {
-            // running 観測しないまま min time 経過。
-            // 5 秒で見切り hide(誤発火対策)。
             if (elapsed > 5000) {
-                log('tryHide: no running observed within 5s, hiding');
+                setBadge('hide (no-running 5s)');
                 forceHide();
             } else {
                 setTimeout(tryHide, 500);
             }
-            return;
         }
-        // SHOWN, IDLE: 直前にユーザ操作で showOverlay が呼ばれた直後など。
-        // 状態遷移を待つ
     }
 
     function forceHide() {
@@ -356,88 +392,91 @@ _INSTALLER_JS_TEMPLATE = """
         }
         clearTimeout(safetyTimer);
         clearTimeout(minTimeTimer);
-        log('forceHide → IDLE');
+        setBadge('IDLE');
     }
 
-    // === ボタンクリック検出(capture phase で React より先に発火)===
-    function isPredictBtnText(text) {
-        // 全角空白・emoji 等を除去して「予想実行」を含むかチェック
-        const norm = (text || '').replace(/\\s+/g, '');
-        return norm.indexOf('予想実行') !== -1;
-    }
-    doc.body.addEventListener('click', function(e) {
-        const target = e.target;
-        if (!target || !target.closest) return;
-        const btn = target.closest('button, [role="button"]');
-        if (!btn) return;
-        if (isPredictBtnText(btn.textContent)) {
-            log('predict button clicked, text=',
-                (btn.textContent || '').slice(0, 40));
-            showOverlay();
+    // === 5 階層 textContent 検査(仮想スクロール対策)===
+    function getNearbyText(el, maxDepth) {
+        if (!el) return '';
+        maxDepth = maxDepth || 5;
+        var text = '';
+        var cur = el;
+        for (var i = 0; i < maxDepth && cur; i++) {
+            try { text += (cur.textContent || '') + ' '; } catch(e){}
+            cur = cur.parentElement;
         }
-    }, { capture: true });
+        return text.replace(/\\s+/g, '');
+    }
 
-    // === ラジオ検出(複数パターン)===
-    function findRadioFromTarget(target) {
-        if (!target || !target.closest) return null;
-        // <input type="radio">
-        if (target.tagName === 'INPUT' && target.type === 'radio') {
-            return target;
-        }
-        // <label> 親
-        const label = target.closest('label');
-        if (label) {
-            const r = label.querySelector('input[type="radio"]');
-            if (r) return r;
-        }
-        // [role="radio"](Streamlit 新版)
-        const roleRadio = target.closest('[role="radio"]');
-        if (roleRadio) return roleRadio;
-        // [data-baseweb="radio"]
-        const baseRadio = target.closest('[data-baseweb="radio"]');
-        if (baseRadio) {
-            const r = baseRadio.querySelector('input[type="radio"]')
-                       || baseRadio;
-            return r;
-        }
-        return null;
-    }
-    function checkAndShowForRadio(radio, eventName) {
-        if (!radio || !radio.closest) return;
-        // 親グループのテキストに「競馬場」を含むか
-        const group = radio.closest(
-            '[role="radiogroup"], [data-baseweb="radio-group"],'
-            + ' [data-baseweb="radio"], [data-testid*="radio"],'
-            + ' [data-testid*="Radio"]'
-        );
-        const groupText = ((group && group.textContent) || '')
-                            .replace(/\\s+/g, '');
-        if (groupText.indexOf('競馬場') !== -1
-                || groupText.indexOf('表示する競馬場') !== -1) {
-            log('course radio:', eventName,
-                groupText.slice(0, 30));
-            showOverlay();
-        }
-    }
-    ['click', 'change', 'pointerdown'].forEach(function(evt) {
-        doc.body.addEventListener(evt, function(e) {
-            const radio = findRadioFromTarget(e.target);
-            if (radio) checkAndShowForRadio(radio, evt);
-        }, { capture: true });
-    });
+    // === ボタン + ラジオ検出(capture phase、複数イベント)===
+    function handleEvent(e, evtName) {
+        var t = e.target;
+        if (!t || !t.closest) return;
 
-    // === 公開:Python 側からのフォールバック呼び出し用 ===
-    window.__showHorseOverlay = showOverlay;
-    window.__hideHorseOverlay = forceHide;
-    if (usingParent) {
-        // parent.document の場合は parent 側の window にも公開
+        // (a) 「予想実行」ボタン
+        var btn = t.closest('button, [role="button"]');
+        if (btn) {
+            var btext = (btn.textContent || '').replace(/\\s+/g, '');
+            if (btext.indexOf('予想実行') !== -1) {
+                setBadge('click@btn:予想実行');
+                showOverlay('predict');
+                return;
+            }
+        }
+
+        // (b) 競馬場ラジオ — 5 階層 textContent で判定
+        var nearby = getNearbyText(t, 5);
+        if (nearby.indexOf('競馬場') !== -1) {
+            // ラジオ要素の存在確認(誤発火防止)
+            var radio = (
+                (t.tagName === 'INPUT' && t.type === 'radio') ? t :
+                (t.closest('label') ? t.closest('label').querySelector(
+                    'input[type="radio"]') : null)
+                || t.closest('[role="radio"]')
+                || t.closest('[data-baseweb="radio"]')
+            );
+            if (radio) {
+                setBadge('click@radio:競馬場(' + evtName + ')');
+                showOverlay('course');
+            }
+        }
+    }
+
+    var EVENTS = ['click', 'change', 'pointerdown'];
+    EVENTS.forEach(function(evt) {
         try {
-            window.parent.__showHorseOverlay = showOverlay;
-            window.parent.__hideHorseOverlay = forceHide;
-        } catch (e) {}
+            doc.body.addEventListener(evt, function(e) {
+                handleEvent(e, evt);
+            }, { capture: true });
+        } catch(e) { log('attach failed for', evt, e); }
+    });
+    // self.document にも(iframe context)念のため
+    if (docKind === 'parent') {
+        try {
+            EVENTS.forEach(function(evt) {
+                document.body.addEventListener(evt, function(e) {
+                    handleEvent(e, evt);
+                }, { capture: true });
+            });
+        } catch(e) {}
     }
+    log('event listeners attached on', docKind, 'doc.body');
 
-    log('event listeners attached (capture phase, click+change+pointerdown)');
+    // === 公開 API(Python 側 / 診断ボタンから呼ぶ用)===
+    doc.__showHorseOverlay = function(reason) {
+        showOverlay(reason || 'manual');
+    };
+    doc.__hideHorseOverlay = forceHide;
+    doc.__horseOverlayBadge = function(text) { setBadge(text); };
+    // window 経由でも公開
+    try {
+        var w = (docKind === 'parent') ? window.parent : window;
+        w.__showHorseOverlay = doc.__showHorseOverlay;
+        w.__hideHorseOverlay = doc.__hideHorseOverlay;
+        w.__horseOverlayBadge = doc.__horseOverlayBadge;
+    } catch(e) {}
+
+    log('=== install complete ===');
 })();
 """.strip()
 
@@ -445,33 +484,15 @@ _INSTALLER_JS_TEMPLATE = """
 # ---------------------------------------------------------------------------
 # 公開 API
 # ---------------------------------------------------------------------------
-_DEBUG_DEFAULT = False  # 本番デフォルト。実機トラブル時は True で再 deploy。
+_DEBUG_DEFAULT = True  # v1.6.5 診断版: デフォルト True で出荷
 
 
-def render_running_horse_overlay(
-    message: str = "予想を計算中…",
-    sub_message: str = "馬たちが走っています 🏇",
-    debug: bool | None = None,
-) -> None:
-    """走る馬オーバーレイをページに 1 度だけインストールする(v1.6.4)。
-
-    呼び出し場所: app.py の `st.set_page_config()` の直後で 1 回だけ。
-    インストール後、ユーザ操作(予想実行ボタン押下 / 競馬場ラジオ切替)を
-    JS が capture phase で検出し、状態機械で最小 800ms 〜 running 終了まで
-    overlay を表示する。
-
-    引数:
-        message: 大見出し(aria-label にも使用)
-        sub_message: 補足メッセージ
-        debug: True で console.log デバッグ出力。None なら _DEBUG_DEFAULT。
-               実機トラブル時は debug=True で再 deploy → コンソール内容を
-               確認 → 原因特定 → debug=False に戻す運用。
-    """
-    if debug is None:
-        debug = _DEBUG_DEFAULT
-
+def _build_html(
+    message: str,
+    sub_message: str,
+    debug: bool,
+) -> str:
     def _esc(s: str) -> str:
-        # JS テンプレートリテラル + HTML 属性両用の最低限のエスケープ
         return (
             (s or "")
             .replace("\\", "\\\\")
@@ -489,23 +510,84 @@ def render_running_horse_overlay(
         .replace("__MESSAGE__", _esc(message))
         .replace("__SUB_MESSAGE__", _esc(sub_message))
     )
-    html = f"<script>{js}</script>"
-    st.markdown(html, unsafe_allow_html=True)
+    return f"<script>{js}</script>"
 
 
-def trigger_overlay_inline() -> None:
-    """Python 側から overlay を即時表示するインライン script を打つ。
+def render_running_horse_overlay(
+    message: str = "予想を計算中…",
+    sub_message: str = "馬たちが走っています 🏇",
+    debug: bool | None = None,
+) -> None:
+    """走る馬オーバーレイを `components.html()` 経由で 1 度だけインストール。
 
-    使用シーン: 予想実行ボタンの handler 内で、JS event listener が
-    何らかの理由で発火しないケースに備えた保険。状態機械の早期 return で
-    二重発火しても無害。
+    v1.6.5: Streamlit 1.30+ で `st.markdown(unsafe_allow_html=True)` 経由の
+    `<script>` がサニタイズされて実行されない既知問題への対応。
+    `streamlit.components.v1.html()` で 0px の不可視 iframe を作成し、
+    その中で実行された `<script>` から `window.parent.document` に overlay
+    を注入する。これは Streamlit が公式に保証する script 実行経路。
     """
-    st.markdown(
-        '<script>'
-        'try{'
-        '(window.__showHorseOverlay||window.parent.__showHorseOverlay||'
-        'function(){})()'
-        '}catch(e){}'
-        '</script>',
-        unsafe_allow_html=True,
+    if debug is None:
+        debug = _DEBUG_DEFAULT
+    html = _build_html(message, sub_message, debug)
+    # height=0 で見た目上は何も表示しないが、内部で iframe が作られて script
+    # が確実に実行される。Streamlit が DOM にこの iframe を maintain する間
+    # 効果が持続する(rerun を跨いだ二重注入は __horseOverlayInstalled で防御)
+    components.html(html, height=0, width=0)
+
+
+def trigger_overlay_inline(reason: str = "predict") -> None:
+    """Python 側から overlay を即時表示する。
+
+    `components.html()` 経由で `window.parent.__showHorseOverlay(reason)` を
+    呼ぶ。JS event listener が何らかの理由で発火しないケースの保険。
+    """
+    js = (
+        "(function(){try{"
+        "var w=window.parent||window;"
+        f"if(w.__showHorseOverlay)w.__showHorseOverlay({reason!r});"
+        "else{try{w.__horseOverlayBadge&&w.__horseOverlayBadge('show NOT FOUND');}catch(e){}"
+        "if(typeof alert==='function')alert('__showHorseOverlay not found');}"
+        "}catch(e){}})();"
     )
+    components.html(f"<script>{js}</script>", height=0, width=0)
+
+
+def diagnostic_force_show() -> None:
+    """サイドバーの「馬を強制表示テスト」ボタンから呼ばれる診断用。
+
+    overlay show + alert で「JS 経路が生きているか」を即座に判別可能にする。
+    """
+    js = (
+        "(function(){try{"
+        "var w=window.parent||window;"
+        "var ok=!!w.__showHorseOverlay;"
+        "if(ok){w.__showHorseOverlay('manual-test');}"
+        "if(typeof alert==='function'){"
+        "alert('__showHorseOverlay='+(ok?'FOUND, called':'NOT FOUND'));"
+        "}"
+        "}catch(e){if(typeof alert==='function')alert('ERROR: '+e.message);}})();"
+    )
+    components.html(f"<script>{js}</script>", height=0, width=0)
+
+
+def diagnostic_status() -> None:
+    """サイドバーの「listener 状況確認」ボタンから呼ばれる診断用。
+
+    バッジに「installed = true/false」を出して、お父様が右下を見るだけで
+    JS インストール成否を判別できるようにする。
+    """
+    js = (
+        "(function(){try{"
+        "var doc=window.parent?window.parent.document:document;"
+        "var inst=!!doc.__horseOverlayInstalled;"
+        "var via=doc.__horseOverlayInstalledVia||'?';"
+        "var w=window.parent||window;"
+        "if(w.__horseOverlayBadge){"
+        " w.__horseOverlayBadge('installed='+inst+' via='+via);"
+        "}"
+        "if(typeof alert==='function'){"
+        "alert('horseOverlayInstalled='+inst+', via='+via+', "
+        "showFn='+(typeof w.__showHorseOverlay));}"
+        "}catch(e){if(typeof alert==='function')alert('STATUS ERR: '+e.message);}})();"
+    )
+    components.html(f"<script>{js}</script>", height=0, width=0)

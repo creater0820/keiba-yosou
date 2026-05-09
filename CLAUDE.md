@@ -453,8 +453,8 @@ keiba-yosou/
   ラジオ click 検出)に変更。常時表示は解消したが、click event listener
   が React の `stopPropagation()` で発火しない / 即座に hide される問題で
   実機では「馬が一切表示されない」状態に。
-- **v1.6.4 UX**(現行、2026-05): **状態機械 + 最小表示時間 + 多重イベント
-  + capture phase + Python 側フォールバック** で根本解決。
+- **v1.6.4 UX**(2026-05): **状態機械 + 最小表示時間 + 多重イベント
+  + capture phase + Python 側フォールバック** で再構築。
   * 状態機械 `IDLE → SHOWN → MIN_TIME_PASSED → RUNNING_DETECTED → IDLE`
     で **最低 800ms** は必ず表示(点滅して見えない問題回避)
   * `running` を観測したら `running` 終了まで hide しない、観測なしなら
@@ -473,3 +473,41 @@ keiba-yosou/
     `window.__showHorseOverlay()` を即時呼び出して保険。状態機械の早期
     return で二重発火しても無害
   * 注入合計 12.1 KB、`:has()` 不使用で常時表示バグの再発防止
+- **v1.6.5 UX**(現行、2026-05): **診断版 — `components.html()` 経路 +
+  可視デバッグバッジ + 強制トリガー UI**。
+  * 主因仮説の確定: Streamlit 1.30+(本プロジェクト 1.57.0)では
+    `st.markdown(unsafe_allow_html=True)` 経由の `<script>` がサニタイザで
+    実行されない。v1.6.0〜v1.6.4 が実機で機能しなかった根本原因。
+  * 解決: `streamlit.components.v1.html(html, height=0, width=0)` で 0px
+    の不可視 iframe を作り、その内部で実行された `<script>` から
+    `window.parent.document` に overlay を注入する公式保証経路に切替。
+  * 画面右下に **`#horse-debug-badge`** を常時表示し、JS の各段階で
+    textContent を更新(`overlay: ready (parent)` / `click@btn:予想実行`
+    / `SHOWN(predict)` / `RUNNING_DETECTED` / `IDLE` 等)。
+    お父様が DevTools を開かなくても状態判別可能。
+  * インストール時に環境調査ログを強制出力(iframe 検出 / CSP テスト /
+    DOM 要素カウント for button・input[type=radio]・[role=radio]・
+    [data-baseweb=radio])。
+  * 5 階層 textContent 検査でラジオ判定を仮想スクロール対応に。
+  * サイドバーに **🔧 診断モード** チェックボックスを設け、
+    「🐎 馬を強制表示テスト」+「📡 listener 状況確認」ボタンで原因特定可能。
+  * 強制表示で馬が出る → イベント検知の問題、出ない → CSS / overlay 注入
+    の問題、と切り分け可能。
+  * DEBUG=True デフォルト、原因特定後 v1.7 で診断 UI と DEBUG を撤去予定。
+
+【お父様向け診断 6 ステップ(v1.6.5)】
+1. アプリを開く → 画面 **右下** に黒い小さなバッジ `overlay: ready (...)`
+   が見えるか確認
+   - 見えない → JS 自体が動いていない(CSP / iframe sandbox 等)
+   - 見える → JS 注入成功、次へ
+2. サイドバーの「🔧 診断モード」をチェック
+3. 「🐎 馬を強制表示テスト」ボタンを押す
+   - 馬が画面を走る → 注入は OK、残るは「click イベントが届いていない」
+   - 馬が出ない + alert が出る → JS 経路は生きてるが overlay show 失敗
+   - 何も出ない → JS 全体が止まっている
+4. 「📡 listener 状況確認」を押す → alert で `installed=true` を確認
+5. 「予想実行」ボタンや競馬場ラジオを押した時、右下バッジが
+   `click@btn:予想実行` や `click@radio:競馬場(click)` に変わるか確認
+   - 変わる + `SHOWN` に進む → 馬が出ているはず
+   - 変わらない → React で stopPropagation されている可能性
+6. バッジの最終状態 + 馬が出たか + alert の内容を開発者に報告
