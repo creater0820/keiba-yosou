@@ -407,24 +407,35 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
 # =====================================================================
 # 公開エントリポイント
 # =====================================================================
-def render_recent_runs_matrix(
+@st.cache_data(show_spinner=False)
+def _build_matrix_html_cached(
+    cache_key: str,
+    _race_card_df: pd.DataFrame,
+    _predictions_payload: tuple,
+    _historical_df: pd.DataFrame,
+) -> str:
+    """マトリクス HTML 構築のキャッシュ版(perf)。
+
+    cache_key には file_hash + going + race_id を渡す前提。同一なら
+    HTML 文字列を再構築せず即返す。Streamlit の st.expander は collapsed
+    でも中身を実行するため、34 レース分の HTML 構築コストが毎 rerun で
+    かかっていた問題への対策。
+
+    _race_card_df / _predictions_payload / _historical_df は ハッシュ対象外。
+    """
+    return _build_matrix_html(
+        _race_card_df, _predictions_payload, _historical_df,
+    )
+
+
+def _build_matrix_html(
     race_card_df: pd.DataFrame,
     predictions: Iterable,
     historical_df: pd.DataFrame,
-) -> None:
-    """
-    1レース分の出走馬全頭について、直近5走戦歴マトリクスを Streamlit に描画する。
-
-    引数:
-        race_card_df: 当該レースの出馬表 DataFrame(1行=1出走馬)
-        predictions: そのレースの HorsePrediction リスト(印・スコア取得用)
-        historical_df: 過去レース DataFrame(履歴抽出元)
-
-    DC 形式の場合: race_card_df.attrs["dc_past_runs"] に過去走 dict が
-    入っているのでそれを優先して使う。historical_df は無視。
-    """
+) -> str:
+    """マトリクス HTML 文字列を構築して返す(pure 関数、Streamlit 出力なし)。"""
     if race_card_df.empty:
-        return
+        return ""
 
     target_date_iso = str(race_card_df["race_date"].iloc[0])
     target_surface = str(race_card_df["surface"].iloc[0])
@@ -512,4 +523,42 @@ def render_recent_runs_matrix(
         "</div>"
     )
 
-    st.markdown("".join(parts), unsafe_allow_html=True)
+    return "".join(parts)
+
+
+def render_recent_runs_matrix(
+    race_card_df: pd.DataFrame,
+    predictions: Iterable,
+    historical_df: pd.DataFrame,
+    *,
+    cache_key: str | None = None,
+) -> None:
+    """
+    1レース分の出走馬全頭について、直近5走戦歴マトリクスを Streamlit に描画する。
+
+    引数:
+        race_card_df: 当該レースの出馬表 DataFrame(1行=1出走馬)
+        predictions: そのレースの HorsePrediction リスト(印・スコア取得用)
+        historical_df: 過去レース DataFrame(履歴抽出元)
+        cache_key (perf): 渡されると HTML 構築結果を @st.cache_data で
+                          メモ化する。呼び出し側は file_hash + going + race_id
+                          等の組合せ文字列を渡す。None なら毎回再構築。
+    """
+    if race_card_df.empty:
+        return
+
+    if cache_key:
+        # predictions は object なのでタプル化して識別子(horse_id, mark, score)
+        # だけをキャッシュ payload として渡す(中身は使わないが Streamlit 側で
+        # 引数同一性比較のため _ プレフィックスで除外する目的)
+        payload = tuple(
+            (str(p.horse_id), getattr(p, "mark", ""), getattr(p, "score", 0.0))
+            for p in predictions
+        )
+        html = _build_matrix_html_cached(
+            cache_key, race_card_df, payload, historical_df,
+        )
+    else:
+        html = _build_matrix_html(race_card_df, predictions, historical_df)
+    if html:
+        st.markdown(html, unsafe_allow_html=True)
