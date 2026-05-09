@@ -432,7 +432,7 @@ keiba-yosou/
   実発火させる。坂路 CSV 未アップロード時は missed_rule_ids にだけ入れて
   「坂路調教 CSV 未提供のためスキップ」表示。F4/F5 は v1.0〜v1.4 まで TODO で
   永続無効だった。
-- **v1.5.x perf**(現行、2026-05): 予想実行を **30.8 秒 → 7.77 秒**(75% 削減)
+- **v1.5.x perf**(2026-05): 予想実行を **30.8 秒 → 7.77 秒**(75% 削減)
   に短縮。判定結果は完全一致(DC + RA+SE 両形式 snapshot diff = 0 行)。
   主な改善: (1) `match_training_to_horses` の `iterrows` 撤去で 99% 短縮、
   (2) `enrich_dc_with_historical` の `iterrows` を `to_dict("records")` に
@@ -440,3 +440,11 @@ keiba-yosou/
   `searchsorted` で O(log N) 化し 91% 短縮、(3) `_build_horse_mark_data` /
   `predict_race_dc` / `get_last_finishing_positions` の各 `iterrows` も
   `to_dict("records")` 化。
+- **v1.6 UX**(現行、2026-05): 走る馬ローディング演出を追加。
+  予想実行ボタン押下時と競馬場フィルタ切替時に、`utils/loading_overlay.py`
+  の `render_running_horse_overlay()` で **inline SVG + CSS keyframes** の
+  半透明オーバーレイを表示し、計算完了後 placeholder.empty() で除去する。
+  外部 CDN / GIF 依存ゼロ(全 4KB)、`prefers-reduced-motion` 対応で静止
+  代替も用意。フィルタ切替は session_state["_last_rendered_course"] で
+  変化検知し、変わった時だけ overlay を出す。@st.fragment scope を壊さない
+  (single-scope 維持)。
