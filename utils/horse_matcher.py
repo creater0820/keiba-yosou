@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 
@@ -65,7 +66,11 @@ def _candidate_horses_for_run(
     *,
     tolerance_days: int = DATE_TOLERANCE_DAYS,
 ) -> set[str]:
-    """historical を「日付 ± tolerance + 距離一致」で絞り、horse_id 集合を返す。"""
+    """historical を「日付 ± tolerance + 距離一致」で絞り、horse_id 集合を返す。
+
+    ※ 旧パス。互換性のため残しているが、`match_all_dc_horses` から
+    呼ばれる場合は事前に距離別 dict 化された高速版が使われる(下記参照)。
+    """
     lo = estimated_date - pd.Timedelta(days=tolerance_days)
     hi = estimated_date + pd.Timedelta(days=tolerance_days)
     mask = (
@@ -75,12 +80,76 @@ def _candidate_horses_for_run(
     return set(hist_indexed.loc[mask, "horse_id"].unique())
 
 
+def _build_distance_buckets(
+    hist_indexed: pd.DataFrame,
+) -> dict[int, tuple]:
+    """距離別に historical を pre-bucket し、各 bucket は (np.array of
+    np.datetime64[ns], np.array of horse_id) のタプル。距離一致 + date 範囲
+    フィルタを numpy searchsorted で O(log N) ルックアップ可能にする
+    (495 馬 × ~5 過去走 = ~3000 回のフィルタ呼び出しが、毎回 159k 行
+    スキャンするのを防ぐ)。
+
+    perf 効果: 約 5 秒 → 数百 ms 想定。
+
+    fix(history): 旧実装は `astype("int64")` で生 int に変換していたが、
+    pandas の datetime resolution に依存して µs / ns どちらにもなり得る
+    (DataFrame 由来は µs、Timestamp.value は ns で 1000 倍ズレ)。
+    `np.datetime64[ns]` の dtype を保ったまま searchsorted する方式に
+    変更し dtype 整合性を担保。
+    """
+    if hist_indexed.empty:
+        return {}
+    # datetime64[ns] のまま保持(.values は np.datetime64 の ndarray を返す)
+    date_arr = hist_indexed["race_date_dt"].to_numpy(dtype="datetime64[ns]")
+    distance = hist_indexed["distance"].to_numpy()
+    horse_id = hist_indexed["horse_id"].astype(str).to_numpy()
+
+    buckets: dict[int, tuple] = {}
+    unique_dists = np.unique(distance)
+    for d in unique_dists:
+        mask = distance == d
+        idx = np.argsort(date_arr[mask])
+        bucket_dates = date_arr[mask][idx]  # datetime64[ns] を維持
+        bucket_hids = horse_id[mask][idx]
+        buckets[int(d)] = (bucket_dates, bucket_hids)
+    return buckets
+
+
+def _candidate_horses_fast(
+    buckets: dict[int, tuple],
+    estimated_date: pd.Timestamp,
+    distance: int,
+    *,
+    tolerance_days: int = DATE_TOLERANCE_DAYS,
+) -> set[str]:
+    """距離別 bucket から date ± tolerance で horse_id 集合を取得する高速版。
+
+    `_build_distance_buckets` で作った bucket(距離別 + date 昇順ソート済)に
+    対して numpy searchsorted を 2 回打つだけで済むので、一回のフィルタが
+    数十マイクロ秒で完了する(従来は数十ミリ秒)。
+
+    搜索キーも `np.datetime64[ns]` で渡し dtype 整合性を保つ。
+    """
+    bucket = buckets.get(int(distance))
+    if bucket is None:
+        return set()
+    bucket_dates, bucket_hids = bucket
+    lo = np.datetime64(estimated_date - pd.Timedelta(days=tolerance_days), "ns")
+    hi = np.datetime64(estimated_date + pd.Timedelta(days=tolerance_days), "ns")
+    lo_idx = np.searchsorted(bucket_dates, lo, side="left")
+    hi_idx = np.searchsorted(bucket_dates, hi, side="right")
+    if lo_idx >= hi_idx:
+        return set()
+    return set(bucket_hids[lo_idx:hi_idx].tolist())
+
+
 def match_dc_horse(
     dc_past_runs: list[dict | None],
     hist_indexed: pd.DataFrame,
     *,
     target_date_iso: str | None = None,
     tolerance_days: int = DATE_TOLERANCE_DAYS,
+    distance_buckets: dict[int, tuple] | None = None,
 ) -> HorseMatchResult:
     """
     DC の 1 馬分の過去走から historical 上の horse_id を推定する。
@@ -110,9 +179,18 @@ def match_dc_horse(
             est_date = pd.Timestamp(date_str)
         except (ValueError, TypeError):
             continue
-        candidates = _candidate_horses_for_run(
-            hist_indexed, est_date, int(dist), tolerance_days=tolerance_days,
-        )
+        # **perf**: distance_buckets が渡されていれば numpy searchsorted ベース
+        # の高速ルックアップ(O(log N))を使う。未指定なら従来の DataFrame mask
+        # フィルタにフォールバック(下位互換)。
+        if distance_buckets is not None:
+            candidates = _candidate_horses_fast(
+                distance_buckets, est_date, int(dist),
+                tolerance_days=tolerance_days,
+            )
+        else:
+            candidates = _candidate_horses_for_run(
+                hist_indexed, est_date, int(dist), tolerance_days=tolerance_days,
+            )
         if not candidates:
             continue
         valid_runs += 1
@@ -161,12 +239,19 @@ def match_all_dc_horses(
     """
     DC 側の全馬について horse_id 推定を一括実行。
     hist_indexed は 1 回だけ作って全馬で共有。
+
+    **perf**: 距離別 bucket(numpy searchsorted で O(log N) ルックアップ)を
+    1 度だけ前処理し、各馬のフィルタ呼び出しに使い回す。495 馬 × ~5 過去走 =
+    ~3000 回のフィルタが、毎回 159k 行スキャンするのを防ぐ。
     """
     hist_indexed = _build_historical_index(historical_df, target_date_iso)
+    distance_buckets = _build_distance_buckets(hist_indexed)
     out: dict[str, HorseMatchResult] = {}
     for hid_dc in dc_horse_ids:
         runs = dc_past_runs_by_horse.get(hid_dc, [])
         out[hid_dc] = match_dc_horse(
-            runs, hist_indexed, target_date_iso=target_date_iso,
+            runs, hist_indexed,
+            target_date_iso=target_date_iso,
+            distance_buckets=distance_buckets,
         )
     return out

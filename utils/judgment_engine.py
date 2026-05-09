@@ -524,22 +524,39 @@ def get_last_finishing_positions(
     target_date: str,
     historical_df: pd.DataFrame,
 ) -> dict[str, int | None]:
-    """各馬の前走着順を返す(target_date より前で最も新しい走)。"""
-    result: dict[str, int | None] = {}
+    """各馬の前走着順を返す(target_date より前で最も新しい走)。
+
+    **perf**: 旧実装は各馬で `relevant[relevant["horse_id"]==hid]` を再フィルタ
+    していて、レース 34 回 × 13-18 馬 = 数百回の filter が累積していた。
+    1 度だけ groupby + first で全馬の前走着順を一括取得するように変更。
+    """
     hids = set(str(h) for h in horse_ids)
-    relevant = historical_df[historical_df["horse_id"].astype(str).isin(hids)].copy()
+    if not hids:
+        return {}
+    # 文字列化は dtype が str でないときだけ実行(parquet 由来の str はそのまま)
+    hid_col = historical_df["horse_id"]
+    if hid_col.dtype != object:
+        hid_col = hid_col.astype(str)
+    mask = hid_col.isin(hids)
+    relevant = historical_df.loc[mask, ["horse_id", "race_date", "finishing_position"]]
     if relevant.empty:
         return {hid: None for hid in hids}
-    relevant["_d"] = pd.to_datetime(relevant["race_date"], errors="coerce")
+    # date を 1 回だけパース
+    dates = pd.to_datetime(relevant["race_date"], errors="coerce")
+    relevant = relevant.assign(_d=dates)
     relevant = relevant[relevant["_d"] < pd.Timestamp(target_date)]
+    if relevant.empty:
+        return {hid: None for hid in hids}
+    # 馬 ID + 日付降順でソート → drop_duplicates で各馬の最新走を 1 行に集約
     relevant = relevant.sort_values("_d", ascending=False)
-
-    for hid in hids:
-        sub = relevant[relevant["horse_id"].astype(str) == hid]
-        if sub.empty:
-            result[hid] = None
+    first_per_horse = relevant.drop_duplicates(subset=["horse_id"], keep="first")
+    # to_dict("records") で純 Python dict に変換し O(1) ルックアップ可能に
+    result: dict[str, int | None] = {hid: None for hid in hids}
+    for rec in first_per_horse.to_dict("records"):
+        hid = str(rec["horse_id"])
+        if hid not in hids:
             continue
-        pos = sub.iloc[0]["finishing_position"]
+        pos = rec.get("finishing_position")
         try:
             if pd.isna(pos):
                 result[hid] = None
