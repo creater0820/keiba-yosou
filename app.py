@@ -766,242 +766,6 @@ def render_predictions_section(
 
 
 # =====================================================================
-# @st.fragment: 競馬場フィルタ + サイドバーリスト + メイン予想結果描画
-# =====================================================================
-# Streamlit 1.33+ の `st.fragment` で、サイドバーの競馬場フィルタラジオを
-# 内側に持つ関数を fragment scope 化する。これによりラジオ変更時:
-#   - 親スクリプトは rerun されない(load_race_card / enrich / predict が走らない)
-#   - fragment 内のウィジェット再構築のみ走る = 数百-1000 個ある親スクリプトの
-#     widget の DOM 再構築コスト(残存 ~10 秒)が撤去される
-#
-# 親変数(race_card_df / historical / file_hash 等)は closure として
-# 関数内から参照される。フィルタ切替時は親変数が変わらないので安全。
-# 引数経由ではなく closure 経由にすることで、関数シグネチャの大きな変更を
-# 避けて既存の predictions 描画関数群を再利用できる。
-def make_filter_fragment(
-    race_card_df,
-    historical,
-    file_hash,
-    training_bytes,
-):
-    """closure を介して fragment 関数を構築するファクトリ。
-
-    モジュール直下で `@st.fragment` を付けた関数を定義すると、関数 object が
-    rerun を跨いで再利用される懸念があるので、毎 rerun でファクトリ経由で
-    新しい関数を生成する。fragment 内で参照する親変数は引数として捕捉。
-    """
-    @st.fragment
-    def _filter_fragment():
-        # ---------- サイドバー中段: 競馬場フィルタ + 推奨馬 + 坂路エリート ----------
-        with st.sidebar:
-            if race_card_df is not None and "racecourse" in race_card_df.columns:
-                st.divider()
-                st.subheader("📍 競馬場フィルタ")
-                _dates_series = pd.to_datetime(
-                    race_card_df["race_date"], errors="coerce",
-                ).dt.date
-                course_dates_map: dict[str, list[dt.date]] = (
-                    race_card_df.assign(_d=_dates_series)
-                    .dropna(subset=["_d", "racecourse"])
-                    .groupby("racecourse")["_d"]
-                    .apply(lambda s: sorted(set(s.tolist())))
-                    .to_dict()
-                )
-                course_options = ["全場"] + [
-                    _format_course_label(c, course_dates_map[c])
-                    for c in sorted(course_dates_map.keys())
-                ]
-                selected_label = st.radio(
-                    "表示する競馬場",
-                    course_options,
-                    index=0,
-                    key="course_filter",
-                )
-                selected_course = _parse_course_from_label(selected_label)
-            else:
-                selected_course = "全場"
-
-            # ----- 🌟 推奨馬 (rating ≥ 100) -----
-            _session_preds = st.session_state.get("all_predictions")
-            if _session_preds and race_card_df is not None:
-                st.divider()
-                st.subheader("🌟 推奨馬 (rating ≥ 100)")
-                _jockey_by_hid: dict[str, str] = {}
-                if "jockey" in race_card_df.columns:
-                    for _, _row in race_card_df.iterrows():
-                        _jockey_by_hid[str(_row["horse_id"])] = (
-                            str(_row.get("jockey", "") or "").strip()
-                        )
-
-                recs: list[dict] = []
-                for _rid, _pred in _session_preds.items():
-                    ratings = getattr(_pred, "horse_ratings", None) or []
-                    if not ratings:
-                        continue
-                    _meta = _pred.race_meta
-                    _course = _meta.get("racecourse", "")
-                    if selected_course != "全場" and _course != selected_course:
-                        continue
-                    for _h in ratings:
-                        if _h.total_rating < 100:
-                            continue
-                        _jockey = _jockey_by_hid.get(_h.horse_id, "") or "(不明)"
-                        if not _jockey.strip():
-                            _jockey = "(不明)"
-                        recs.append({
-                            "course": _course,
-                            "race_number": int(_meta.get("race_number") or 0),
-                            "post_time": _meta.get("post_time", ""),
-                            "horse_number": _h.horse_number,
-                            "horse_name": _h.horse_name,
-                            "rating": _h.total_rating,
-                            "jockey": _jockey,
-                        })
-
-                recs.sort(key=lambda r: (r["post_time"] or "99:99", r["race_number"]))
-
-                if recs:
-                    for r in recs:
-                        _line = (
-                            f"<span title='rating {r['rating']}'>"
-                            f"{r['course']}{r['race_number']}R "
-                            f"<b>{r['horse_number']} {r['horse_name']}</b>"
-                            f"({r['jockey']})"
-                            f"</span>"
-                        )
-                        st.markdown(_line, unsafe_allow_html=True)
-                else:
-                    st.caption("該当馬なし(rating 100 以上の馬がいません)")
-
-                # ----- 🔥 坂路で超エリート級の上がり(F4/F5) -----
-                st.divider()
-                st.subheader("🔥 坂路で超エリート級の上がり")
-                st.caption(
-                    "坂路調教で 1F または 1F+2F が 11.2 秒以下の超エリート級。"
-                    "激走・大穴の前兆。"
-                )
-
-                elite_horses: list[dict] = []
-                for _rid, _pred in _session_preds.items():
-                    ratings = getattr(_pred, "horse_ratings", None) or []
-                    if not ratings:
-                        continue
-                    _meta = _pred.race_meta
-                    _course = _meta.get("racecourse", "")
-                    if selected_course != "全場" and _course != selected_course:
-                        continue
-                    for _h in ratings:
-                        f5_hit = next(
-                            (m for m in _h.matched if m.rule_id == "F5"), None,
-                        )
-                        f4_hit = next(
-                            (m for m in _h.matched if m.rule_id == "F4"), None,
-                        )
-                        hit = f5_hit or f4_hit
-                        if not hit:
-                            continue
-                        _jockey = _jockey_by_hid.get(_h.horse_id, "") or "(当日確認)"
-                        if not _jockey.strip():
-                            _jockey = "(当日確認)"
-                        elite_horses.append({
-                            "course": _course,
-                            "race_number": int(_meta.get("race_number") or 0),
-                            "post_time": _meta.get("post_time", ""),
-                            "horse_number": _h.horse_number,
-                            "horse_name": _h.horse_name,
-                            "jockey": _jockey,
-                            "rule_id": hit.rule_id,
-                            "reason": hit.reason or "",
-                        })
-
-                elite_horses.sort(key=lambda x: (
-                    x["post_time"] or "99:99", x["course"], x["race_number"],
-                ))
-
-                _training_uploaded = (
-                    st.session_state.get("uploaded_training_bytes") is not None
-                )
-
-                if not _training_uploaded:
-                    st.caption(
-                        "坂路調教 CSV 未アップロードのため評価不可。"
-                        "メイン画面の「② 坂路調教 CSV」からアップロードしてください。"
-                    )
-                elif not elite_horses:
-                    st.caption("該当馬なし(本日 F4/F5 発火 0 頭)")
-                else:
-                    def _render_elite(h: dict) -> None:
-                        emoji = "💥" if h["rule_id"] == "F5" else "🔥"
-                        line1 = (
-                            f"**{emoji} {h['course']}{h['race_number']}R** "
-                            f"{h['horse_number']} {h['horse_name']}({h['jockey']})"
-                        )
-                        line2 = f"&nbsp;&nbsp;{h['rule_id']}: {h['reason']}"
-                        st.markdown(line1)
-                        st.caption(line2)
-
-                    if len(elite_horses) >= 4:
-                        with st.expander(
-                            f"🔥 坂路エリート {len(elite_horses)} 頭",
-                            expanded=False,
-                        ):
-                            for _h in elite_horses:
-                                _render_elite(_h)
-                    else:
-                        for _h in elite_horses:
-                            _render_elite(_h)
-
-            # ---------- 📊 過去データ(fragment 内、軽量集計表示) ----------
-            st.divider()
-            st.subheader("📊 過去データ")
-            if historical is not None:
-                SOURCE_LABEL = {
-                    "parquet": "本番(Parquet)",
-                    "csv_sample": "サンプル(CSV)",
-                }
-                for table_name, src in historical.sources.items():
-                    st.metric(table_name, SOURCE_LABEL.get(src, src))
-                st.divider()
-                st.metric(
-                    "過去レース数",
-                    f"{historical.races['race_id'].nunique():,} レース",
-                )
-                st.metric("登録馬数", f"{len(historical.horses):,} 頭")
-
-        # ---------- メインエリア: 出馬表サマリ + 予想結果描画 ----------
-        if race_card_df is not None:
-            if selected_course == "全場":
-                display_df = race_card_df
-            else:
-                display_df = race_card_df[
-                    race_card_df["racecourse"] == selected_course
-                ].copy()
-
-            predictions_in_session = st.session_state.get("all_predictions")
-            session_pred_key = st.session_state.get("predictions_for_file")
-            key_match = (
-                session_pred_key is not None
-                and file_hash is not None
-                and (
-                    session_pred_key == file_hash
-                    or session_pred_key.startswith(f"{file_hash}_")
-                )
-            )
-            if (predictions_in_session is not None
-                    and key_match
-                    and historical is not None):
-                render_predictions_section(
-                    all_predictions=predictions_in_session,
-                    race_card_df=race_card_df,
-                    display_df=display_df,
-                    selected_course=selected_course,
-                    historical_races=historical.races,
-                )
-
-    return _filter_fragment
-
-
-# =====================================================================
 # 過去データの読み込み
 # =====================================================================
 HISTORICAL_DATA_SCHEMA_VERSION = "v4-rating-engine"
@@ -1230,24 +994,40 @@ with st.sidebar:
         st.divider()
 
     # サイドバーのタイトル + 「使い方」説明は個人運用フェーズ移行に伴い削除。
-    # メインエリア上部の st.title「🏇 競馬予想アプリ(本ロジック v1.5)」は残す。
+    # メインエリア上部の st.title「🏇 競馬予想アプリ(本ロジック v1.4)」は残す。
 
-    # ⚠ 旧: 競馬場フィルタ + 推奨馬 + 坂路エリート + メイン予想結果は
-    # `make_filter_fragment()` で生成する @st.fragment 関数内に移動した。
-    # ラジオ変更時に親スクリプト全体の widget 再構築コストが消える。
-    # ここでは selected_course 値を session_state から拾うだけで他処理に使う。
-    selected_course = _parse_course_from_label(
-        st.session_state.get("course_filter", "全場")
-    )
+    if race_card_df is not None and "racecourse" in race_card_df.columns:
+        st.divider()
+        st.subheader("📍 競馬場フィルタ")
+        _dates_series = pd.to_datetime(race_card_df["race_date"], errors="coerce").dt.date
+        course_dates_map: dict[str, list[dt.date]] = (
+            race_card_df.assign(_d=_dates_series)
+            .dropna(subset=["_d", "racecourse"])
+            .groupby("racecourse")["_d"]
+            .apply(lambda s: sorted(set(s.tolist())))
+            .to_dict()
+        )
+        course_options = ["全場"] + [
+            _format_course_label(c, course_dates_map[c])
+            for c in sorted(course_dates_map.keys())
+        ]
+        selected_label = st.radio(
+            "表示する競馬場",
+            course_options,
+            index=0,
+            key="course_filter",
+        )
+        selected_course = _parse_course_from_label(selected_label)
+    else:
+        selected_course = "全場"
 
-    # NOTE: 以下のコメント群は移動先(make_filter_fragment 内)を指す
     # ====================================================================
-    # 🌟 推奨馬 (rating ≥ 100) — fragment 内に移動済み
+    # 🌟 推奨馬 (rating ≥ 100) ─ 競馬場フィルタの直下に配置
     # ====================================================================
     # 予想実行済みかつ rating モードの結果がセッションにある場合のみ表示。
     # 競馬場フィルタの選択値で絞り込み連動する。
-    _session_preds_legacy = None  # legacy 旧コードの分岐は無効化
-    if False and _session_preds_legacy and race_card_df is not None:
+    _session_preds = st.session_state.get("all_predictions")
+    if _session_preds and race_card_df is not None:
         st.divider()
         st.subheader("🌟 推奨馬 (rating ≥ 100)")
         # 馬番→ jockey 引きマップ(race_card_df から)
@@ -1382,7 +1162,16 @@ with st.sidebar:
                 for _h in elite_horses:
                     _render_elite(_h)
 
-    # 過去データセクションは fragment 内に移動済み(make_filter_fragment 内)。
+    st.divider()
+    st.subheader("📊 過去データ")
+    # historical はサイドバー描画より前に load 済み。ここでは表示のみ。
+    if historical is not None:
+        SOURCE_LABEL = {"parquet": "本番(Parquet)", "csv_sample": "サンプル(CSV)"}
+        for table_name, src in historical.sources.items():
+            st.metric(table_name, SOURCE_LABEL.get(src, src))
+        st.divider()
+        st.metric("過去レース数", f"{historical.races['race_id'].nunique():,} レース")
+        st.metric("登録馬数", f"{len(historical.horses):,} 頭")
 
 
 # =====================================================================
@@ -1466,22 +1255,65 @@ if race_card_df is not None and historical is not None:
 
 
 # =====================================================================
-# 予想結果の描画
+# 予想結果の描画(メインエリアのみ @st.fragment 化)
 # =====================================================================
 # predictions_for_file は DC モードでは "<file_hash>_dc_<going>" 形式なので
-# 完全一致ではなく前方一致(file_hash で始まる)で判定する
-# ----- 予想結果描画は fragment 関数内で実行 -----
-# fragment 化により、サイドバーの競馬場フィルタラジオ変更時:
-#   - 親スクリプトは rerun されない
-#   - fragment 関数内のウィジェットだけ scope 内 rerun
-# これで「キャッシュ済みなのに widget 再構築 ~10s」だった残存遅延を撤去。
-if race_card_df is None:
-    st.info("👆 出馬表 CSV をアップロードしてください。")
-else:
-    _filter_fragment = make_filter_fragment(
+# 完全一致ではなく前方一致(file_hash で始まる)で判定する。
+#
+# **fragment 設計の前提**:
+# - サイドバー(フィルタラジオ・推奨馬・坂路エリート・過去データ)は
+#   fragment 外。ラジオ変更で full rerun が起きるが、サイドバー処理は
+#   軽量(キャッシュヒットで瞬時)なので許容。
+# - メインエリアの 34 レース × 多セクション widget 群が最重コストなので
+#   そこだけ単一 scope の fragment に閉じ込める。これで fragment 制約
+#   違反(複数 scope への書き込み)を絶対起こさない。
+# - 親 rerun 時は fragment も再実行されるが、enrich / predict 等の重い
+#   親スクリプト処理は session_state キャッシュで 0ms スキップされる。
+predictions_in_session = st.session_state.get("all_predictions")
+session_pred_key = st.session_state.get("predictions_for_file")
+key_match = (
+    session_pred_key is not None
+    and file_hash is not None
+    and (session_pred_key == file_hash or session_pred_key.startswith(f"{file_hash}_"))
+)
+
+
+@st.fragment
+def _main_predictions_fragment(
+    *,
+    all_predictions,
+    race_card_df,
+    display_df,
+    selected_course,
+    historical_races,
+) -> None:
+    """メイン予想結果描画を単一 scope (default main) に閉じた fragment。
+
+    fragment 内では `with st.sidebar:` 等 別 scope 書き込みを **絶対に
+    行わない**(StreamlitAPIException の原因)。`render_predictions_section`
+    は内部的に st.expander / st.markdown 等のメイン scope widget だけを
+    呼ぶので、単一 scope ルールを満たす。
+    """
+    render_predictions_section(
+        all_predictions=all_predictions,
         race_card_df=race_card_df,
-        historical=historical,
-        file_hash=file_hash,
-        training_bytes=training_bytes,
+        display_df=display_df,
+        selected_course=selected_course,
+        historical_races=historical_races,
     )
-    _filter_fragment()
+
+
+if (predictions_in_session is not None
+        and key_match
+        and race_card_df is not None
+        and historical is not None):
+    _main_predictions_fragment(
+        all_predictions=predictions_in_session,
+        race_card_df=race_card_df,
+        display_df=display_df,
+        selected_course=selected_course,
+        historical_races=historical.races,
+    )
+
+elif race_card_df is None:
+    st.info("👆 出馬表 CSV をアップロードしてください。")
