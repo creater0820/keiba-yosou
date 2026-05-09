@@ -300,13 +300,26 @@ def enrich_dc_with_historical(
     else:
         hist_subset = historical_df.iloc[0:0].copy()
 
-    # 各馬の最新走情報(馬名・騎手 取得用)
+    # 各馬の最新走情報(馬名 取得用)
     if not hist_subset.empty:
         hist_subset_sorted = hist_subset.sort_values("race_date", ascending=False)
         latest_per_horse = hist_subset_sorted.drop_duplicates("horse_id", keep="first")
         latest_per_horse = latest_per_horse.set_index("horse_id")
     else:
+        hist_subset_sorted = hist_subset
         latest_per_horse = pd.DataFrame()
+
+    # 騎手名は最新走で空文字 / NaN だったら過去走を遡って有効値を探す。
+    # historical のデータ品質で「最新走の jockey」だけ抜けてるケースがあるため。
+    def _latest_valid_jockey(hist_hid: str) -> str:
+        if hist_subset_sorted is None or hist_subset_sorted.empty:
+            return ""
+        sub = hist_subset_sorted[hist_subset_sorted["horse_id"] == hist_hid]
+        for _, prow in sub.iterrows():
+            j = str(prow.get("jockey") or "").strip()
+            if j and j.lower() != "nan":
+                return j
+        return ""
 
     # 各馬の過去 5 走(target_date より前)を historical から取得
     if not hist_subset.empty:
@@ -342,7 +355,12 @@ def enrich_dc_with_historical(
             hist_hid = result.matched_horse_id
             latest = latest_per_horse.loc[hist_hid]
             new_horse_names.append(str(latest.get("horse_name") or row["horse_name"]))
-            new_jockeys.append(str(latest.get("jockey") or "(不明)").strip() or "(不明)")
+            # 最新走の jockey が空 → 過去走を遡って有効値を探す
+            valid_jockey = _latest_valid_jockey(hist_hid)
+            if not valid_jockey:
+                # それでも取れない場合「(当日確認)」(混乱防止、当日変更ある可能性も)
+                valid_jockey = "(当日確認)"
+            new_jockeys.append(valid_jockey)
             matched_hist_ids.append(hist_hid)
             # 過去 5 走を historical の dict に変換(rating engine の入力形式に揃える)
             past_for_horse = past_grouped.get(hist_hid)
@@ -403,6 +421,29 @@ def enrich_dc_with_historical(
     df.attrs["dc_total_count"] = len(matched_hist_ids)
     df.attrs["dc_going"] = today_going
     return df
+
+
+@st.cache_data(show_spinner="DC 形式の過去走を historical と照合中…")
+def enrich_dc_with_historical_cached(
+    file_hash: str,
+    today_going: str,
+    _race_card_df: pd.DataFrame,
+    _historical_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    enrich_dc_with_historical のキャッシュ版。
+
+    キャッシュキー = (file_hash, today_going)。
+    file_hash が同じ + 同じ going なら 159k 行スキャン ×N 馬 を再実行しない。
+    DataFrame は _ プレフィックスで Streamlit のハッシュ対象から除外。
+    pandas attrs はキャッシュ pickle で保持されるので戻り値のみで OK。
+
+    本関数は app.py の毎 rerun から呼ばれるが、2 回目以降のサイドバー操作
+    では cache hit で即座に返るため UI レスポンスが大幅に改善する。
+    """
+    return enrich_dc_with_historical(
+        _race_card_df, _historical_df, today_going=today_going,
+    )
 
 
 @st.cache_data(show_spinner="出馬表を読み込み中…")

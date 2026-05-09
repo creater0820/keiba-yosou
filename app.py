@@ -697,6 +697,32 @@ if file_hash is not None and uploaded is not None:
 
 
 # =====================================================================
+# historical 過去データ load + DC enrich(サイドバー描画より先に実行)
+# =====================================================================
+# サイドバー内の「🌟 推奨馬」一覧が race_card_df.jockey を読むため、
+# enrich を サイドバー描画の前 に終わらせて実 jockey 名を反映させる必要がある。
+# 旧コードは サイドバー後に enrich していたため、推奨馬の騎手が「(不明)」
+# 固定になっていた(commit 49e4b6b 後の表示バグ)。
+try:
+    historical = get_historical()
+except FileNotFoundError as e:
+    historical = None
+    st.error(str(e))
+
+if (race_card_df is not None
+        and historical is not None
+        and race_card_df.attrs.get("data_format") == "dc"
+        and file_hash is not None):
+    from data_loader import enrich_dc_with_historical_cached
+    today_going = st.session_state.get("dc_going", "良")
+    # キャッシュキー = (file_hash, today_going)。同じ CSV + 同じ馬場なら
+    # 2 回目以降の rerun で historical 159k 行スキャンを丸ごとスキップ。
+    race_card_df = enrich_dc_with_historical_cached(
+        file_hash, today_going, race_card_df, historical.races,
+    )
+
+
+# =====================================================================
 # サイドバー: アプリ説明 + 競馬場フィルタ + 過去データ統計
 # =====================================================================
 with st.sidebar:
@@ -732,18 +758,8 @@ with st.sidebar:
         )
         st.divider()
 
-    st.title("🏇 競馬予想アプリ")
-    st.caption("JRA中央競馬・本ロジック v1.2")
-
-    st.markdown(
-        """
-        ### 使い方
-        1. 当日の出馬表 CSV をアップロード
-        2. 「予想実行」ボタンを押す
-        3. 各レースで ◎本命 / ワイド候補 / 危険人気馬 を確認
-        4. 推奨買い目を参考に
-        """
-    )
+    # サイドバーのタイトル + 「使い方」説明は個人運用フェーズ移行に伴い削除。
+    # メインエリア上部の st.title「🏇 競馬予想アプリ(本ロジック v1.2)」は残す。
 
     if race_card_df is not None and "racecourse" in race_card_df.columns:
         st.divider()
@@ -831,32 +847,14 @@ with st.sidebar:
 
     st.divider()
     st.subheader("📊 過去データ")
-    SOURCE_LABEL = {"parquet": "本番(Parquet)", "csv_sample": "サンプル(CSV)"}
-    try:
-        historical = get_historical()
+    # historical はサイドバー描画より前に load 済み。ここでは表示のみ。
+    if historical is not None:
+        SOURCE_LABEL = {"parquet": "本番(Parquet)", "csv_sample": "サンプル(CSV)"}
         for table_name, src in historical.sources.items():
             st.metric(table_name, SOURCE_LABEL.get(src, src))
         st.divider()
         st.metric("過去レース数", f"{historical.races['race_id'].nunique():,} レース")
         st.metric("登録馬数", f"{len(historical.horses):,} 頭")
-    except FileNotFoundError as e:
-        historical = None
-        st.error(str(e))
-
-
-# =====================================================================
-# DC 形式 v1.2: historical 連携を **毎 rerun で実行**(サイドバーで
-# dc_going が決まった直後)。これで race_card_df.attrs.dc_match_count 等が
-# 常に最新値で保持され、render の banner が正しく描画される。
-# =====================================================================
-if (race_card_df is not None
-        and historical is not None
-        and race_card_df.attrs.get("data_format") == "dc"):
-    from data_loader import enrich_dc_with_historical
-    today_going = st.session_state.get("dc_going", "良")
-    race_card_df = enrich_dc_with_historical(
-        race_card_df, historical.races, today_going=today_going,
-    )
 
 
 # =====================================================================
