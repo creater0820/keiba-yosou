@@ -334,21 +334,34 @@ def is_jra_van_headerless(text: str) -> bool:
 # は取得可能なので、簡易 rating(指数を直接スコアに使う)+ 戦歴マトリクスで
 # 「動く予想画面」を成立させる。
 
-# 列レイアウト(0-index):
+# 列レイアウト(JRA-VAN/TARGET frontier JV 公式「出馬表CSV形式」45列、0-index):
 #   col[0]  10桁 ID  = JRA場(2) + 年下2桁 + 開催コード(2) + R番(2) + 馬番(2)
-#   col[1]  TARGET 内部場コード(per-race 固定。意味不明確、未デコード)
+#   col[1]  クラスコード(7/23/43/67/131/163/179 等、当日のクラス級)
 #   col[2]  距離 (m)
-#   col[3]  surface コード(0=芝 / 1=ダ / 2=障害(今回の出走) / 3=障害(過去) / 8=その他)
-#   col[4]  クラス/グレード(8-18 程度、未デコード)
-#   col[5]  当日の TARGET 指数(0 or 80-130 の整数、本紙総合指数相当)
-#   col[6]  馬属性指数(用途不明、表示未使用)
-#   col[7-9] パディング 0
-#   col[10..44] = 過去 7 走 × 5 列(track_code, distance, surface, finishing_pos, target_index)
+#   col[3]  トラックコード(0=芝 / 1=ダ / 2=障害(今回出走))
+#   col[4]  頭数
+#   col[5]  ZI(TARGET 総合指数、0 or 80-130 の整数。本紙総合指数相当)
+#   col[6]  前走との間隔(週)— 今回レースから前走までの週数
+#   col[7]  確定着順(当日未走なので常に 0)
+#   col[8]  異常コード
+#   col[9]  人気(morning オッズ取り込み後)、未取り込み時は 0
+#   col[10..44] = 過去 7 走 × 5 列(class_code, distance, course_code,
+#                                    weeks_since_prior, adjusted_time)
+#
+# ★ 重要: DC 形式の過去走には **着順** は含まれない(公式仕様)。
+#   過去走パターンマッチでは (推定 race_date, distance) を JOIN キーに使う。
+#   各過去走の推定 race_date は col[6](today の weeks_since_prior)を起点に
+#   weeks_since_prior チェーンを遡って計算する:
+#     run[0].date = today_date - col[6] * 7 days
+#     run[1].date = run[0].date - run[0].weeks_since_prior * 7 days
+#     run[2].date = run[1].date - run[1].weeks_since_prior * 7 days
+#     ...
 
 DC_EXPECTED_COLS = 46           # 末尾カンマで 1 列増えて 46 になる典型(45 列 + NaN)
 DC_PAST_RUNS_PER_HORSE = 7      # col[10..44] = 5 × 7 走
 DC_FIRST_PAST_RUN_COL = 10
 DC_PAST_RUN_BLOCK_SIZE = 5
+DC_TODAY_WEEKS_SINCE_PRIOR_COL = 6   # col[6] = 今回レースと前走の間隔(週)
 
 # col[0][:2] = JRA 公式場コード(2桁 0-padded)
 JRA_COURSE_BY_CODE: dict[str, str] = {
@@ -356,13 +369,10 @@ JRA_COURSE_BY_CODE: dict[str, str] = {
     "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉",
 }
 
-# DC 形式の surface コード(実データ DC260509 で観測):
-#   0 = 芝(一般・直線/内回り等)
-#   1 = ダート
-#   2 = 障害(今回出走、距離 2880-2890m 系)
-#   3 = 障害(過去走の別表現)
-#   8 = 芝(外回り・特別?、京都11R 天皇賞春G1 2200m / 京都9R 1600m /
-#         新潟10R 1800m が該当 → 全て芝レースで確定)
+# DC 形式の course_code → 推定 surface マッピング(実データ観測ベース)。
+# 仕様上は「場+芝ダ 合成コード」だが、観測値は 0/1/2/3/8 のみで「surface のみ」
+# として運用するのが現実的。場名は他列(col[0][:2] = 当日 JRA 場)で取れる。
+#   0 = 芝(一般)、1 = ダ、2 = 障害(当日出走)、3 = 障害(過去)、8 = 芝(別表現)
 DC_SURFACE_BY_CODE: dict[str, str] = {
     "0": "芝", "1": "ダ", "2": "障", "3": "障", "8": "芝",
 }
@@ -375,19 +385,29 @@ def parse_dc_dataframe(
 ) -> tuple[pd.DataFrame, dict[str, list[dict | None]]]:
     """
     DC 形式の生 DataFrame(header=None / dtype=str)を、当日出馬表として
-    アプリ内部スキーマに変換する。
+    アプリ内部スキーマに変換する。**公式仕様準拠版**。
+
+    過去走 5 列の正しいセマンティクス:
+      base+0: class_code(クラスコード)
+      base+1: distance(距離)
+      base+2: course_code(場+芝ダ 合成コード、本実装では surface に縮約)
+      base+3: weeks_since_prior(前走との間隔・週)— ※ 着順ではない
+      base+4: adjusted_time(補正タイム、0=記録なし)
+
+    各過去走の推定 race_date は col[6](今回 → 前走 の週数)を起点に
+    weeks_since_prior チェーンを遡って算出。これにより
+    (race_date ± 3 日, distance) を JOIN キーとした厳密な horse_id 推定が可能。
 
     引数:
         raw: pd.read_csv(header=None, dtype=str) で読んだ DC 形式 CSV
-        target_date_iso: "YYYY-MM-DD" 形式の対象日。None ならファイル名から
-            推定したいが pd.DataFrame には情報がないので呼び出し側で渡す。
+        target_date_iso: "YYYY-MM-DD" 形式の対象日(必須)。
 
     戻り値:
-        race_card_df: アプリの当日出馬表スキーマに揃えた DataFrame
-                      (data_format="dc" の attrs 付与は呼び出し側で行う)
-        past_runs_by_horse: {horse_id: [run0..run4]} 形式の過去走 dict
-                            run の中身は dict (surface, distance, finishing_position,
-                            last_3f=NaN, racecourse, jockey="(不明)" 等)
+        race_card_df: 出馬表スキーマに揃えた DataFrame
+        past_runs_by_horse: {horse_id: [run0..run4]} の過去走 dict
+            run の各キー: race_date, distance, surface, class_code, course_code,
+                         weeks_since_prior, adjusted_time, finishing_position(常に None),
+                         last_3f(None), corner_1..4(None), going(""), jockey("(不明)")
     """
     if raw.shape[1] < DC_EXPECTED_COLS - 2:
         raise ValueError(
@@ -402,7 +422,7 @@ def parse_dc_dataframe(
     id_col = raw[0].fillna("").astype(str)
     jra_code = id_col.str[:2]
     yy_code = id_col.str[2:4]
-    meeting_code = id_col.str[4:6]   # 回+日目(13/25/35 等)
+    meeting_code = id_col.str[4:6]
     race_no_str = id_col.str[6:8]
     horse_no_str = id_col.str[8:10]
 
@@ -410,44 +430,38 @@ def parse_dc_dataframe(
     race_number = pd.to_numeric(race_no_str, errors="coerce").astype("Int64")
     horse_number = pd.to_numeric(horse_no_str, errors="coerce").astype("Int64")
 
-    # race_id 生成: target_date_iso が既知ならそれを使う、無ければ年は 20xx 推定
     if target_date_iso:
         date_str = target_date_iso
     else:
-        # フォールバック(年月日不明): yy + 開催コードから簡易生成
         date_str = "20" + yy_code + "-00-00"
 
-    # race_id = R{YYYYMMDD}-{場頭文字}{R番zfill2}
     race_id = (
         "R" + date_str.replace("-", "")
         + "-" + racecourse.str[:1]
         + race_number.astype("string").str.zfill(2)
     )
-    # 1 馬 1 行を識別する horse_id(血統番号は無いので合成 ID)
     horse_id = (
         "DC-" + jra_code + "-" + meeting_code + "-"
         + race_no_str + "-" + horse_no_str
     )
 
-    # ----- 距離 / surface(今回レース) -----
+    # ----- 当日レース基本情報 -----
     distance = pd.to_numeric(raw[2], errors="coerce").astype("Int64")
     surface = raw[3].map(DC_SURFACE_BY_CODE).fillna("?")
     target_index = pd.to_numeric(raw[5], errors="coerce")
-
-    # 馬名は持たない → 「馬番N」で代替
+    today_weeks_since_prior = pd.to_numeric(raw[DC_TODAY_WEEKS_SINCE_PRIOR_COL], errors="coerce")
     horse_name = "馬番" + horse_number.astype("string")
 
-    # 出馬表 DataFrame を組み立て
     race_card_df = pd.DataFrame({
         "race_id":            race_id,
         "race_date":          date_str,
         "racecourse":         racecourse,
         "race_number":        race_number,
         "race_name":          "(レース名不明)",
-        "post_time":          "",       # DC には発走時刻なし
+        "post_time":          "",
         "distance":           distance,
         "surface":            surface,
-        "going":              "",       # 馬場状態なし
+        "going":              "",
         "finishing_position": pd.array([pd.NA] * len(raw), dtype="Int64"),
         "horse_number":       horse_number,
         "horse_id":           horse_id,
@@ -463,52 +477,88 @@ def parse_dc_dataframe(
         "odds":               pd.NA,
         "corner_1":           pd.NA, "corner_2": pd.NA,
         "corner_3":           pd.NA, "corner_4": pd.NA,
-        # DC 専用列
         "target_index":       target_index,
+        # DC 専用: 当日 → 前走 の週数(過去走 race_date チェーンの起点)
+        "today_weeks_since_prior": today_weeks_since_prior.astype("Int64"),
     })
 
-    # ----- 過去走 7 走を辞書化 -----
+    # ----- 過去走 7 走を辞書化(weeks_since_prior チェーンで race_date 推定) -----
+    target_dt = pd.Timestamp(date_str) if date_str and "00" not in date_str.split("-")[-1] else None
+
     past_runs_by_horse: dict[str, list[dict | None]] = {}
     for idx, row in raw.iterrows():
         hid = race_card_df.iloc[idx]["horse_id"]
         runs: list[dict | None] = []
+
+        # 当日 → 前走 の週数
+        try:
+            today_w = int(row.iloc[DC_TODAY_WEEKS_SINCE_PRIOR_COL])
+        except (ValueError, TypeError):
+            today_w = 0
+
+        # 直前のレース日(初期は今日)。各 past run の date を逆算するための pointer
+        # past_run[0] (前走) date = today_dt - today_w * 7 days
+        # past_run[i+1] date = past_run[i] date - past_run[i].weeks_since_prior * 7 days
+        if target_dt is not None and today_w > 0:
+            prev_run_date: pd.Timestamp | None = target_dt - pd.Timedelta(days=today_w * 7)
+        else:
+            prev_run_date = None
+
         for run_i in range(DC_PAST_RUNS_PER_HORSE):
             base = DC_FIRST_PAST_RUN_COL + run_i * DC_PAST_RUN_BLOCK_SIZE
             if base + DC_PAST_RUN_BLOCK_SIZE > len(row):
                 runs.append(None)
                 continue
             try:
-                track_code = str(row.iloc[base]).strip()
+                class_code = str(row.iloc[base]).strip()
                 p_dist = pd.to_numeric(row.iloc[base + 1], errors="coerce")
-                p_surf_code = str(row.iloc[base + 2]).strip()
-                p_pos = pd.to_numeric(row.iloc[base + 3], errors="coerce")
-                p_idx = pd.to_numeric(row.iloc[base + 4], errors="coerce")
+                course_code = str(row.iloc[base + 2]).strip()
+                p_weeks = pd.to_numeric(row.iloc[base + 3], errors="coerce")
+                p_adj_time = pd.to_numeric(row.iloc[base + 4], errors="coerce")
             except Exception:
                 runs.append(None)
                 continue
-            # 全部 0 / 欠損なら出走なし扱い
-            if (pd.isna(p_dist) or p_dist == 0) and (pd.isna(p_pos) or p_pos == 0):
+
+            # 全要素 0 / 欠損 → 出走なし扱い
+            dist_int = int(p_dist) if pd.notna(p_dist) else 0
+            weeks_int = int(p_weeks) if pd.notna(p_weeks) else 0
+            adj_time_int = int(p_adj_time) if pd.notna(p_adj_time) else 0
+            if dist_int <= 0 and weeks_int <= 0 and adj_time_int <= 0:
                 runs.append(None)
+                # 日付チェーンも進めない(欠損で連鎖が破綻)
+                prev_run_date = None
                 continue
+
+            run_date_str = ""
+            if prev_run_date is not None:
+                run_date_str = prev_run_date.strftime("%Y-%m-%d")
+
             runs.append({
-                # アプリ内部スキーマに合わせる(欠損は NaN/None)
-                "race_date":          "",
-                "racecourse":         "",            # TARGET 内部場コードのデコード未対応
-                "surface":            DC_SURFACE_BY_CODE.get(p_surf_code, "?"),
-                "distance":           int(p_dist) if pd.notna(p_dist) else 0,
-                "finishing_position": int(p_pos) if pd.notna(p_pos) else None,
-                "last_3f":            None,
+                "race_date":          run_date_str,           # weeks chain で推定
+                "racecourse":         "",                       # 場の decode は未対応
+                "surface":            DC_SURFACE_BY_CODE.get(course_code, "?"),
+                "distance":           dist_int,
                 "going":              "",
+                # finishing_position は DC には含まれない(公式仕様)
+                "finishing_position": None,
+                "last_3f":            None,
                 "jockey":             "(不明)",
                 "carry_weight":       None,
                 "corner_1":           None, "corner_2": None,
                 "corner_3":           None, "corner_4": None,
-                # DC 専用: 過去走の TARGET 指数
-                "target_index":       int(p_idx) if pd.notna(p_idx) and p_idx > 0 else None,
-                # 元の TARGET 内部場コード(マッピング表ができたら表示用に使う)
-                "_dc_track_code":     track_code,
+                # DC 仕様準拠の固有フィールド
+                "class_code":         class_code,
+                "course_code":        course_code,
+                "weeks_since_prior":  weeks_int,
+                "adjusted_time":      adj_time_int,
             })
-        # 直近 5 走に揃える(余りは捨てる、不足はパディング)
+
+            # 次の run(i+1)の race_date を進める
+            if prev_run_date is not None and weeks_int > 0:
+                prev_run_date = prev_run_date - pd.Timedelta(days=weeks_int * 7)
+            else:
+                prev_run_date = None  # チェーン不能 → これ以降の run も日付推定不能
+
         runs5 = runs[:5]
         while len(runs5) < 5:
             runs5.append(None)

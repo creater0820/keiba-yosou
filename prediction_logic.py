@@ -325,30 +325,51 @@ def predict_race_dc(
     historical: HistoricalData | pd.DataFrame,
     target_date: str | None = None,
 ) -> RacePrediction:
-    """DC 形式 CSV 専用の簡易予想。
+    """DC 形式 CSV 専用の予想(v1.2 ハイブリッドモード)。
 
-    DC 形式は 馬名・騎手・上3F・通過順位・馬場・過去走 race_date を持たないため
-    本来の C/D/E/F1/F2/F3 ルール群はすべて発火不可能。代替として:
+    動作モード(レース内の馬ごとに自動切替):
+    - **フルモード**: 過去走パターンマッチで historical horse_id が特定でき、
+      historical の上3F・通過順位・馬場 を取得できた馬。
+      → C/D/E/F1/F2/F3 ルールで rating を計算(本ロジック v1.1 完全準拠)
+    - **簡易モード**: マッチ失敗馬。
+      → TARGET 指数(col[5])を rating として採用
 
-    - **TARGET 指数(col[5])** を直接 rating 値として採用
-    - 過去 7 走は race_card_df.attrs["dc_past_runs"] から取得(DC ファイル
-      自体に同梱されている)
-    - 減点 B1/B2 は人気・脚質情報が無いため適用しない
-    - ワイド候補は TARGET 指数 上位馬から採る(同 priority weight)
+    人気は TARGET 指数の同レース内ランクで代用(1=最高指数)。
+    これで A1/A2/A4/A5/B1 ルールも条件次第で発火可能になる。
 
-    本関数の戻り値は logic_mode="dc" の RacePrediction。app.py のレンダラは
-    既存の RA+SE 用パスを再利用しつつ、DC 固有のセクション(過去走マトリクス
-    が DC 形式の付属データを使う等)を分岐表示する。
+    判定 / ワイド候補抽出 / 減点 / 買い目生成 は既存 v1.1 のヘルパを
+    そのまま再利用する(RA+SE と同じ rating 値ベースのロジック)。
     """
+    if isinstance(historical, HistoricalData):
+        hist_df = historical.races
+    else:
+        hist_df = historical
+
     meta = _build_race_meta(race_card_df)
     if target_date is None:
         target_date = meta.get("race_date", "")
 
     past_runs_by_horse = race_card_df.attrs.get("dc_past_runs", {})
+    today_going = str(race_card_df.attrs.get("dc_going") or
+                       race_card_df["going"].iloc[0] if not race_card_df.empty else "" or "良")
+    if today_going not in ("良", "稍重", "稍", "重", "不良"):
+        today_going = "良"
+    # race_meta の going を上書き(rating engine が読む)
+    meta["going"] = today_going
 
-    # 1) HorseRating 相当のリストを TARGET 指数から組み立て
+    field_size = len(race_card_df)
+    horses_df = race_card_df.reset_index(drop=True)
+
+    # ----- 人気を TARGET 指数 のレース内ランクで再計算 -----
+    target_indices = pd.to_numeric(horses_df.get("target_index"), errors="coerce")
+    pop_rank = target_indices.rank(method="min", ascending=False, na_option="bottom")
+    pop_rank = pop_rank.fillna(0).astype(int)
+
+    # ----- 各馬の HorseRating + HorseMarkData を組み立て -----
     horse_ratings: list[HorseRating] = []
-    for _, row in race_card_df.reset_index(drop=True).iterrows():
+    horses_v1: list[HorseMarkData] = []
+    full_mode_count = 0
+    for idx, row in horses_df.iterrows():
         hid = str(row["horse_id"])
         try:
             hn = int(row["horse_number"]) if pd.notna(row["horse_number"]) else 0
@@ -358,63 +379,102 @@ def predict_race_dc(
             ti = float(row["target_index"]) if pd.notna(row["target_index"]) else 0.0
         except (ValueError, TypeError):
             ti = 0.0
-        rating = HorseRating(
+        try:
+            popularity = int(pop_rank.iloc[idx])
+        except (IndexError, ValueError, TypeError):
+            popularity = 0
+        try:
+            frame = horse_number_to_frame(hn, field_size) if hn else 0
+        except ValueError:
+            frame = 0
+
+        runs = past_runs_by_horse.get(hid, [None] * 5)
+        # フルモード判定: matched_historical_horse_id 列があり、かつ
+        # past_runs に last_3f / corner_1 がある(historical 由来)なら full
+        matched_hist_id = row.get("matched_historical_horse_id") if "matched_historical_horse_id" in horses_df.columns else None
+        is_full = matched_hist_id is not None and any(
+            (r and r.get("last_3f") is not None) for r in runs
+        )
+
+        if is_full:
+            # フルモード: 脚質を historical 通過順位から判定 + rating engine を起動
+            # スケール統一のため TARGET 指数 をベースラインに使い、ルール bonus を加算する
+            # (簡易モード=TARGET 指数 単独 と公平に比較できるようにする)
+            full_mode_count += 1
+            running_style = determine_running_style(runs)
+            last_pos = runs[0].get("finishing_position") if runs and runs[0] else None
+            rule_obj = compute_horse_rating(
+                horse_id=hid,
+                horse_name=str(row["horse_name"]),
+                horse_number=hn,
+                frame_number=frame,
+                popularity=popularity,
+                running_style=running_style,
+                last_finishing_position=last_pos,
+                today_carry_weight=None,  # DC は当日斤量持たず F3 は永続無効
+                past_runs=runs,
+                race_meta=meta,
+            )
+            # rating = TARGET 指数(ベースライン) + ルール発火合計
+            rating_obj = HorseRating(
+                horse_id=rule_obj.horse_id,
+                horse_name=rule_obj.horse_name,
+                horse_number=rule_obj.horse_number,
+                frame_number=rule_obj.frame_number,
+                popularity=rule_obj.popularity,
+                running_style=rule_obj.running_style,
+                total_rating=int(round(ti)) + rule_obj.total_rating,
+                matched=rule_obj.matched,
+                last_finishing_position=rule_obj.last_finishing_position,
+                today_carry_weight=rule_obj.today_carry_weight,
+                rule24_active=rule_obj.rule24_active,
+            )
+        else:
+            # 簡易モード: TARGET 指数を rating として採用
+            running_style = "不明(先行扱い)"
+            rating_obj = HorseRating(
+                horse_id=hid,
+                horse_name=str(row["horse_name"]),
+                horse_number=hn,
+                frame_number=frame,
+                popularity=popularity,
+                running_style=running_style,
+                total_rating=int(round(ti)),
+                matched=[],
+                last_finishing_position=None,
+                today_carry_weight=None,
+                rule24_active=False,
+            )
+
+        horse_ratings.append(rating_obj)
+        horses_v1.append(HorseMarkData(
             horse_id=hid,
             horse_name=str(row["horse_name"]),
             horse_number=hn,
-            frame_number=0,             # DC では枠番不明 → 0
-            popularity=0,                # DC では人気不明 → 0
-            running_style="不明(先行扱い)",  # 通過順位不明
-            total_rating=int(round(ti)),
-            matched=[],                  # ルール集計しない(rating = TARGET 指数のみ)
-            last_finishing_position=None,
-            today_carry_weight=None,
-            rule24_active=False,
-        )
-        horse_ratings.append(rating)
-
-    # 2) 本命判定: rating ≥ HONMEI_RATING_THRESHOLD(=100)を◎候補に
-    judgment = determine_main_pick_v2(
-        horse_ratings, meta, threshold=HONMEI_RATING_THRESHOLD,
-    )
-
-    # 3) ワイド候補: 軸馬を除いた rating 上位 2-3 頭を A2 相当で出す
-    axis_id = judgment.main_pick or judgment.sub_pick
-    sorted_ratings = sorted(horse_ratings, key=lambda r: -r.total_rating)
-    wides: list[WideCandidate] = []
-    for r in sorted_ratings:
-        if r.horse_id == axis_id:
-            continue
-        if r.total_rating < 80:  # DC では指数 80 未満は候補から外す
-            continue
-        wides.append(WideCandidate(
-            horse_id=r.horse_id,
-            horse_name=r.horse_name,
-            horse_number=r.horse_number,
-            popularity=0,
-            matched_rules=["DC"],
-            reasons=[f"DC: TARGET 指数 {r.total_rating}"],
-            priority=r.total_rating,
-        ))
-        if len(wides) >= 3:
-            break
-
-    # 4) 簡易な HorseMarkData リスト(UI 互換用に最小限の値を入れる)
-    horses_v1: list[HorseMarkData] = []
-    for r in horse_ratings:
-        horses_v1.append(HorseMarkData(
-            horse_id=r.horse_id,
-            horse_name=r.horse_name,
-            horse_number=r.horse_number,
-            frame_number=r.frame_number,
-            popularity=r.popularity,
-            running_style=r.running_style,
+            frame_number=frame,
+            popularity=popularity,
+            running_style=running_style,
             marks_count=0,
             matched_rules=[],
-            last_finishing_position=None,
+            last_finishing_position=rating_obj.last_finishing_position,
         ))
 
-    # 5) 買い目生成(既存ヘルパで OK)
+    # ----- 本命判定 + 減点(B1/B2)+ ワイド候補 -----
+    # DC モードでは TARGET 指数(平均 97)をベースラインに足しているため、
+    # RA+SE と同じ 100 閾値だと 36/36 全レース ◎ になり選択性が出ない。
+    # キャリブレーション結果(DC260509 で実測):
+    #   閾値 130 → 31/36 / 150 → 30/36 / 170 → 25/36 / 200 → 7/36
+    # spec 目標「5〜15 レースで ◎」に合わせて 200 を採用。
+    # TARGET 指数 ≈ 100(中位)+ 強い C ルール 1 本(50 点)+ 弱いルール
+    # 数本(計 50 点)= 200 程度のスコアが要件相当。
+    DC_HONMEI_THRESHOLD = 200
+    judgment = determine_main_pick_v2(
+        horse_ratings, meta, threshold=DC_HONMEI_THRESHOLD,
+    )
+    wides = extract_wide_candidates_v2(horse_ratings, meta)
+    wides = filter_by_frame_parity(wides, horses_v1)
+
+    # ----- 買い目生成 -----
     betting = generate_betting_recommendations(
         judgment.main_pick, judgment.sub_pick, wides, horses_v1
     )
@@ -430,17 +490,12 @@ def predict_race_dc(
         logic_mode="dc",
         horse_ratings=horse_ratings,
     )
-    # 過去走を pred の race_meta に格納(レンダラが参照する)
-    pred.race_meta["dc_past_runs"] = {
-        hid: runs for hid, runs in past_runs_by_horse.items()
-        if any(r.race_id == race_card_df.iloc[0]["race_id"]
-               for r in [pred] if hid in {h.horse_id for h in horses_v1})
-    }
-    # シンプルに同レースの全馬の過去走を格納
     pred.race_meta["dc_past_runs"] = {
         h.horse_id: past_runs_by_horse.get(h.horse_id, [None] * 5)
         for h in horses_v1
     }
+    pred.race_meta["dc_full_mode_count"] = full_mode_count
+    pred.race_meta["dc_total_count"] = len(horses_v1)
     return pred
 
 
