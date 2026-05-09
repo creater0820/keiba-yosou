@@ -398,8 +398,10 @@ def predict_race_dc(
 
         if is_full:
             # フルモード: 脚質を historical 通過順位から判定 + rating engine を起動
-            # スケール統一のため TARGET 指数 をベースラインに使い、ルール bonus を加算する
-            # (簡易モード=TARGET 指数 単独 と公平に比較できるようにする)
+            # **v1.3 純粋ロジック**: rating = ルール加算合計のみ。
+            # TARGET 指数(ZI)は HorseRating.target_index に参考値として保持
+            # するが total_rating には含めない。お父様独自ロジック(C/D/E/F)の
+            # 真の発火率で順位付けする方針。
             full_mode_count += 1
             running_style = determine_running_style(runs)
             last_pos = runs[0].get("finishing_position") if runs and runs[0] else None
@@ -415,7 +417,6 @@ def predict_race_dc(
                 past_runs=runs,
                 race_meta=meta,
             )
-            # rating = TARGET 指数(ベースライン) + ルール発火合計
             rating_obj = HorseRating(
                 horse_id=rule_obj.horse_id,
                 horse_name=rule_obj.horse_name,
@@ -423,16 +424,18 @@ def predict_race_dc(
                 frame_number=rule_obj.frame_number,
                 popularity=rule_obj.popularity,
                 running_style=rule_obj.running_style,
-                total_rating=int(round(ti)) + rule_obj.total_rating,
+                total_rating=rule_obj.total_rating,  # TARGET 指数を加算しない
                 matched=rule_obj.matched,
                 last_finishing_position=rule_obj.last_finishing_position,
                 today_carry_weight=rule_obj.today_carry_weight,
                 rule24_active=rule_obj.rule24_active,
                 evaluated_rule_ids=rule_obj.evaluated_rule_ids,
                 missed_rule_ids=rule_obj.missed_rule_ids,
+                target_index=int(round(ti)),  # 参考値として保持
             )
         else:
-            # 簡易モード: TARGET 指数を rating として採用
+            # 簡易モード(マッチ失敗): rating = 0(評価不能を明示)。
+            # TARGET 指数は target_index に「参考値」として保持。
             running_style = "不明(先行扱い)"
             rating_obj = HorseRating(
                 horse_id=hid,
@@ -441,11 +444,12 @@ def predict_race_dc(
                 frame_number=frame,
                 popularity=popularity,
                 running_style=running_style,
-                total_rating=int(round(ti)),
+                total_rating=0,  # ルール評価不能 → 0
                 matched=[],
                 last_finishing_position=None,
                 today_carry_weight=None,
                 rule24_active=False,
+                target_index=int(round(ti)),  # 参考値として保持
             )
 
         horse_ratings.append(rating_obj)
@@ -462,16 +466,11 @@ def predict_race_dc(
         ))
 
     # ----- 本命判定 + 減点(B1/B2)+ ワイド候補 -----
-    # DC モードでは TARGET 指数(平均 97)をベースラインに足しているため、
-    # RA+SE と同じ 100 閾値だと 36/36 全レース ◎ になり選択性が出ない。
-    # キャリブレーション結果(DC260509 で実測):
-    #   閾値 130 → 31/36 / 150 → 30/36 / 170 → 25/36 / 200 → 7/36
-    # spec 目標「5〜15 レースで ◎」に合わせて 200 を採用。
-    # TARGET 指数 ≈ 100(中位)+ 強い C ルール 1 本(50 点)+ 弱いルール
-    # 数本(計 50 点)= 200 程度のスコアが要件相当。
-    DC_HONMEI_THRESHOLD = 200
+    # **v1.3 純粋ロジック**: rating = ルール加算合計のみ(TARGET 指数除外)。
+    # 閾値は RA+SE と同じ HONMEI_RATING_THRESHOLD = 100 に統一。
+    # 「お父様のルールが 100 点分発火した馬」だけが ◎本命候補になる。
     judgment = determine_main_pick_v2(
-        horse_ratings, meta, threshold=DC_HONMEI_THRESHOLD,
+        horse_ratings, meta, threshold=HONMEI_RATING_THRESHOLD,
     )
     wides = extract_wide_candidates_v2(horse_ratings, meta)
     wides = filter_by_frame_parity(wides, horses_v1)

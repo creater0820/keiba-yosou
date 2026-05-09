@@ -111,6 +111,32 @@ def test_rating_rules_counts():
     assert HONMEI_RATING_THRESHOLD == 100, "本命閾値は 100 点"
 
 
+def test_horse_rating_has_target_index_default_zero():
+    """v1.3: HorseRating.target_index は default 0 で、
+    compute_horse_rating(RA+SE 経路)ではデフォルト値のまま残る。
+    DC 経路で別途 prediction_logic 側が int(round(ZI)) を注入する。"""
+    r = _compute()
+    assert hasattr(r, "target_index"), "target_index フィールド必須"
+    assert r.target_index == 0, "RA+SE 経路では target_index は 0(注入なし)"
+
+
+def test_horse_rating_total_rating_excludes_target_index():
+    """v1.3 純粋ロジック: total_rating はルール加算のみで構成され、
+    target_index の値とは独立している。"""
+    run = _run(
+        surface="芝", distance=1400, going="良",
+        last_3f=33.2, racecourse="東京",
+        corners=(10, 5, 3, 2),
+    )
+    r = _compute(past_runs=[run] + _empty_runs(4),
+                 race_meta=_meta(distance=1400, surface="芝", going="良"))
+    rule_sum = sum(hit.rate for hit in r.matched)
+    assert r.total_rating == rule_sum, (
+        f"total_rating={r.total_rating} はルール加算合計 {rule_sum} と一致 "
+        "(TARGET 指数等を含まない純粋ロジック)"
+    )
+
+
 # ==================================================================
 # C カテゴリ — 距離×馬場 上3F+通過順位改善
 # ==================================================================

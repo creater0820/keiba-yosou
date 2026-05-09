@@ -342,15 +342,22 @@ def _render_section_all_marks(pred: RacePrediction) -> None:
                     f"({r.running_style} / {pop_str}) rate {r.total_rating}"
                 )
                 with st.expander(head, expanded=False):
-                    # ----- DC モード: rate 内訳を「基本 + ルール加算」分解で透明化 -----
+                    # ----- DC モード v1.3 純粋ロジック: rating = ルール加算のみ -----
+                    # TARGET 指数(ZI)は **参考値** として別行に分離表示。
+                    # 「お父様独自ロジック C/D/E/F の真の発火」だけで評価される。
                     if is_dc:
-                        # ルール加算合計(matched の rate 合計)
                         rule_bonus = sum(hit.rate for hit in r.matched)
-                        baseline = r.total_rating - rule_bonus
                         is_matched = not r.horse_name.startswith("馬番")
+                        target_idx = getattr(r, "target_index", 0)
+
                         st.markdown("**内訳:**")
-                        st.write(f"- 基本(TARGET 指数): **+{baseline}**")
-                        st.write(f"- ルール加算合計: **+{rule_bonus}**")
+                        st.write(f"- ルール加算合計: **+{rule_bonus}**(これが rate 値)")
+                        if target_idx:
+                            st.caption(
+                                f"参考: TARGET 指数(ZI)= {target_idx} "
+                                "(rate には含めません)"
+                            )
+
                         if r.matched:
                             st.markdown("**発火ルール:**")
                             for hit in r.matched:
@@ -366,12 +373,14 @@ def _render_section_all_marks(pred: RacePrediction) -> None:
                                 "満たす過去走がなかった。"
                             )
                         elif not r.matched and not is_matched:
-                            st.caption("過去走 DB 照合できなかったため "
-                                       "C/D/E ルール評価をスキップ "
-                                       "(rate は TARGET 指数のみ)。")
+                            # マッチ失敗馬: rate=0、「評価不能」を明示
+                            st.warning(
+                                "🛇 過去走 DB 照合できないため **評価不能**。"
+                                f"(参考 TARGET 指数 {target_idx} は無視)"
+                            )
                         elif not r.matched and is_matched:
                             st.caption("過去走と今回レースの surface・距離区分が"
-                                       "全て不一致のため C/D/E 評価対象なし。")
+                                       "全て不一致のため C/D/E 評価対象なし(ルール加算 0)。")
                         if r.rule24_active:
                             st.caption("📌 F2 救済発動(2,3走前で評価)")
                     # ----- rating(RA+SE)モード: 既存表記そのまま -----
@@ -453,9 +462,9 @@ def render_predictions_section(
     sample_pred = next(iter(display_predictions.values()), None)
     sample_mode = getattr(sample_pred, "logic_mode", "onmark") if sample_pred else "onmark"
     if sample_mode == "dc":
-        # DC 形式 v1.2: 過去走パターンマッチで historical 連携した馬は
-        # 本ロジック v1.1 のフルモード(C/D/E/F1/F2/F3)で評価される。
-        # マッチ失敗馬は DC 簡易モード(TARGET 指数 単独)で fallback。
+        # DC 形式 v1.3 純粋ロジック: rating はお父様独自ルール(C/D/E/F)のみで
+        # 計算。TARGET 指数(ZI = col[5])は **参考値** として表示するが
+        # rating には含めない。マッチ失敗馬は rate=0 で「評価不能」扱い。
         match_count = race_card_df.attrs.get("dc_match_count", 0)
         match_high = race_card_df.attrs.get("dc_match_count_high", 0)
         match_med = race_card_df.attrs.get("dc_match_count_medium", 0)
@@ -464,14 +473,17 @@ def render_predictions_section(
         match_rate = (match_count / total_count * 100) if total_count else 0
         n_failed = total_count - match_count
         st.success(
-            f"📊 **DC 形式 v1.2 ハイブリッドモードで動作中**\n\n"
+            f"📊 **DC 形式 v1.3 純粋ロジックモードで動作中**\n\n"
+            f"rating はお父様独自ルール(C/D/E/F1/F2/F3)のみで計算。"
+            f"**TARGET 指数(ZI)は参考値として表示するが評価には含めません。**\n\n"
             f"過去走パターンマッチ: **高 {match_high} / 中 {match_med} / 失敗 {n_failed} 頭** "
             f"(全 {total_count} 頭、合計マッチ率 {match_rate:.1f}%)\n"
             f"- 高信頼度(5走以上一致): C/D/E/F1/F2 でフル評価\n"
             f"- 中信頼度(3-4走一致 + 直近 18ヶ月内): 同じくフル評価(やや弱)\n"
-            f"- 失敗馬: TARGET 指数(col[5])直接採用の簡易モード\n"
+            f"- 失敗馬: 過去走照合不能 → **rate = 0(評価不能)** として除外\n"
             f"- 当日馬場: **{going}**(サイドバー「🏟 当日馬場」で変更可能)\n\n"
-            f"※ 当日斤量(F3 ルール)・坂路調教(F4/F5)は DC に含まれず永続無効。"
+            f"※ ◎本命閾値は RA+SE と同じ rating ≥ 100。"
+            f"当日斤量(F3 ルール)・坂路調教(F4/F5)は DC に含まれず永続無効。"
         )
     elif sample_mode == "rating":
         st.caption(
