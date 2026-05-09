@@ -6,7 +6,7 @@ UI セクション構成(各レース内):
   2) ワイド候補       WC1〜WC3 + 該当ルール理由
   3) 危険人気馬       減点ルール(R6, R7)該当馬 + 警告
   4) 推奨買い目       単勝・複勝・馬連・三連複・ワイド の全券種
-  5) 直近5走戦歴      Phase 1 のマトリクス(既存維持)
+  5) 直近10走戦歴     Phase 1 のマトリクス(v1.7.1 で 5→10 列に追従)
   6) 全頭の○マーク詳細  全頭 + 該当ルール
 
 データ層: utils/{onmark_rules, judgment_engine, betting_strategy} 経由で
@@ -857,8 +857,9 @@ def render_predictions_section(
             _render_section_betting(p)
             st.divider()
 
-            # 直近5走戦歴(Phase 1 のマトリクス)
-            with st.expander("📊 直近5走戦歴", expanded=False):
+            # 直近10走戦歴(v1.4 でロジック側の評価範囲を 10 走に拡張、
+            # v1.7.1 で UI ヘッダ + データ列を 10 列に追従)
+            with st.expander("📊 直近10走戦歴", expanded=False):
                 race_card_for_this = display_df[display_df["race_id"] == race_id].copy()
                 # DC 形式の場合は pred.race_meta["dc_past_runs"] を attrs に
                 # 引き継いでレンダラに渡す(レンダラはこれを優先利用する)。

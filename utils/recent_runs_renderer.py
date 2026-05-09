@@ -1,7 +1,7 @@
 """
-1レース分の出走馬全頭について、直近5走戦歴マトリクスを HTML で描画する。
+1レース分の出走馬全頭について、直近10走戦歴マトリクスを HTML で描画する。
 
-C1 では「縦3行(着順 / コース距離 / 上がり3F)+ 横5列(5走前→前走)」の
+C1 では「縦3行(着順 / コース距離 / 上がり3F)+ 横10列(10走前→前走)」の
 基本テーブル構造だけを実装。C2 で着順の色分け・サーフェスマッチ ★、
 C3 で上がり3F の強調表示を追加する。
 
@@ -475,13 +475,15 @@ def _build_matrix_html(
     # 履歴の取得経路:
     # 1. DC 形式の race_card_df.attrs["dc_past_runs"] が優先(DC ファイル同梱)
     # 2. それ以外は historical_df から血統登録番号で引き当て
+    # v1.7.1: ロジック側 v1.4 で評価範囲が 5→10 走に拡張されたが、UI ヘッダが
+    # 5 列のまま残っていてデータ列とズレが生じていた問題を解消。
     horse_ids_tuple = tuple(m[0] for m in horse_meta)
     dc_past_runs = race_card_df.attrs.get("dc_past_runs")
     if dc_past_runs:
-        history = {hid: dc_past_runs.get(hid, [None] * 5) for hid in horse_ids_tuple}
+        history = {hid: dc_past_runs.get(hid, [None] * 10) for hid in horse_ids_tuple}
     else:
         history = get_recent_runs_for_race(
-            horse_ids_tuple, target_date_iso, historical_df, n=5
+            horse_ids_tuple, target_date_iso, historical_df, n=10
         )
 
     # ----- HTML 組み立て -----
@@ -489,12 +491,13 @@ def _build_matrix_html(
     parts.append(
         "<thead><tr><th></th>"
         "<th>前走</th><th>2走前</th><th>3走前</th><th>4走前</th><th>5走前</th>"
+        "<th>6走前</th><th>7走前</th><th>8走前</th><th>9走前</th><th>10走前</th>"
         "</tr></thead><tbody>"
     )
 
     for hid, mark, hn, name, _score in horse_meta:
-        runs = history.get(hid, [None] * 5)
-        # runs は [前走, 2走前, ..., 5走前] の直近順。表示も同じく左=前走、右=5走前。
+        runs = history.get(hid, [None] * 10)
+        # runs は [前走, 2走前, ..., 10走前] の直近順。表示も同じく左=前走、右=10走前。
         # 新聞・専門紙の戦歴と同じ並びで「直近の調子」を左端で素早く読める。
 
         # ----- 当日のジョッキー + 前走比較で赤字判定 -----
@@ -508,9 +511,14 @@ def _build_matrix_html(
             today_jockey=today_jockey,
             jockey_changed=jockey_changed,
         )
+        # 10 列固定で表示するため、runs を必ず長さ 10 にパディング
+        # (新馬や DC マッチ失敗で短い場合でも表崩れを防ぐ)
+        runs_padded = list(runs) + [None] * (10 - len(runs))
+        runs_padded = runs_padded[:10]
+
         parts.append("<tr>")
         parts.append(f'<td class="horse-label">{label}</td>')
-        for run in runs:
+        for run in runs_padded:
             parts.append(_build_run_cell(run, target_surface, target_distance))
         parts.append("</tr>")
 
@@ -543,7 +551,7 @@ def render_recent_runs_matrix(
     cache_key: str | None = None,
 ) -> None:
     """
-    1レース分の出走馬全頭について、直近5走戦歴マトリクスを Streamlit に描画する。
+    1レース分の出走馬全頭について、直近10走戦歴マトリクスを Streamlit に描画する。
 
     引数:
         race_card_df: 当該レースの出馬表 DataFrame(1行=1出走馬)
@@ -575,7 +583,7 @@ def render_recent_runs_matrix(
         # cache 周りの異常で落ちた場合でも予想結果セクション全体は止めない。
         # cache 抜きで再構築を試み、それもダメなら静かに描画スキップ。
         st.caption(
-            f"(直近5走戦歴マトリクスの描画でエラー: {type(e).__name__})"
+            f"(直近10走戦歴マトリクスの描画でエラー: {type(e).__name__})"
         )
         try:
             html = _build_matrix_html(
