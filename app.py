@@ -44,7 +44,7 @@ from utils.recent_runs_renderer import render_recent_runs_matrix
 # 画面全体の設定
 # =====================================================================
 st.set_page_config(
-    page_title="競馬予想アプリ(本ロジック v1.2)",
+    page_title="競馬予想アプリ(本ロジック v1.4)",
     page_icon="🏇",
     layout="wide",
 )
@@ -506,8 +506,8 @@ def render_predictions_section(
         )
     elif sample_mode == "rating":
         st.caption(
-            "ロジック: **本ロジック v1.1 (rating-based)** — C/D/E/F1/F2/F3 評価で "
-            "rating ≥ 100 を ◎本命に確定。"
+            "ロジック: **本ロジック v1.4 (rating-based + 直近10走評価)** — "
+            "C/D/E/F1/F2/F3 を直近10走で評価し、rating ≥ 100 で ◎本命に確定。"
         )
     else:
         st.caption(
@@ -667,7 +667,7 @@ def get_historical(_schema_version: str = HISTORICAL_DATA_SCHEMA_VERSION) -> His
 # =====================================================================
 # メイン領域 上部: タイトル + 出馬表アップロード
 # =====================================================================
-st.title("🏇 競馬予想アプリ(本ロジック v1.2)")
+st.title("🏇 競馬予想アプリ(本ロジック v1.4)")
 st.caption("当日の出馬表 CSV をアップロードして「予想実行」を押してください。")
 
 # 別ページ(ロジック説明 等)に遷移しても CSV を保持するため、
@@ -700,11 +700,29 @@ if uploaded is not None:
     st.session_state[SS_FILE_NAME] = source_name
     st.session_state[SS_FILE_HASH] = file_hash
 elif st.session_state.get(SS_FILE_BYTES) is not None:
-    # 別ページから戻ってきた → uploader は空だが session に履歴あるので復元
+    # 別ページから戻ってきた → uploader は空だが session に履歴あるので復元。
+    # アップローダー直下に明示バナーを出す:
+    # 「ロジック説明ページ → 戻る」でアップローダーが視覚的に空に見えるため、
+    # お父様が「再アップロードが必要」と誤認しないようすぐ目につく位置に配置。
     file_bytes = st.session_state[SS_FILE_BYTES]
     file_hash = st.session_state[SS_FILE_HASH]
     source_name = st.session_state[SS_FILE_NAME]
     restored_from_session = True
+    msg_col, btn_col = st.columns([5, 1])
+    msg_col.info(
+        f"📂 アップロード履歴を復元中: **{source_name}**  \n"
+        "ページ切替後もそのまま使えます。別ファイルに切り替えるなら"
+        "右の「🗑 クリア」を押してから新しいファイルを選択してください。"
+    )
+    if btn_col.button(
+        "🗑 クリア",
+        help="アップロード履歴と予想結果を消す(新規ファイルの読み込みに切替)",
+        key="clear_session_top",
+    ):
+        for k in (SS_FILE_BYTES, SS_FILE_NAME, SS_FILE_HASH,
+                  "all_predictions", "predictions_for_file"):
+            st.session_state.pop(k, None)
+        st.rerun()
 
 # race_card_df を構築(新規 / 復元 共通)
 if file_bytes is not None:
@@ -800,7 +818,7 @@ with st.sidebar:
         st.divider()
 
     # サイドバーのタイトル + 「使い方」説明は個人運用フェーズ移行に伴い削除。
-    # メインエリア上部の st.title「🏇 競馬予想アプリ(本ロジック v1.2)」は残す。
+    # メインエリア上部の st.title「🏇 競馬予想アプリ(本ロジック v1.4)」は残す。
 
     if race_card_df is not None and "racecourse" in race_card_df.columns:
         st.divider()
@@ -913,17 +931,10 @@ if race_card_df is not None:
         display_df = race_card_df[race_card_df["racecourse"] == selected_course].copy()
 
     course_suffix = f" / {selected_course}のみ表示中" if selected_course != "全場" else ""
+    # アップローダー直下に既に restore バナー + クリアボタンを出しているので、
+    # ここはシンプルに「読み込み完了」表示に統一(復元時もファイル名を再掲)。
     if restored_from_session:
-        msg_col, btn_col = st.columns([5, 1])
-        msg_col.info(
-            f"📂 セッションから復元: {source_name}{course_suffix}"
-            "(別ページから戻った時はアップロード履歴を再利用しています)"
-        )
-        if btn_col.button("🗑 クリア", help="アップロード履歴と予想結果を消す"):
-            for k in (SS_FILE_BYTES, SS_FILE_NAME, SS_FILE_HASH,
-                       "all_predictions", "predictions_for_file"):
-                st.session_state.pop(k, None)
-            st.rerun()
+        st.success(f"📂 復元済み: {source_name}{course_suffix}")
     else:
         st.success(f"読み込み完了: {source_name}{course_suffix}")
 
