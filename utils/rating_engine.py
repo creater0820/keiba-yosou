@@ -1,9 +1,12 @@
 """
-本ロジック v1.1 / Rating-based 判定の **計算エンジン**。
+本ロジック v1.4 / Rating-based 判定の **計算エンジン**。
 
-各馬の直近5走 + 当日メタを入力に、CLAUDE.md「ロジック v1.1」の C/D/E/F
+各馬の **直近10走** + 当日メタを入力に、CLAUDE.md「ロジック v1.4」の C/D/E/F
 ルールを順次評価して合計 rating を返す。判定エンジン v2 は本モジュールの
 出力 (HorseRating) を消費して ◎本命を決める。
+
+v1.4 で評価範囲を 5 走 → 10 走に拡張。脚質判定(determine_running_style)は
+別経路で head5(直近の脚質傾向重視)、戦歴マトリクス UI も 5 走表示のまま。
 
 主要関数:
 - compute_horse_rating(past_runs, today_horse_ctx, race_meta, policy)
@@ -13,7 +16,7 @@
 1. C/D/E の上3F 系は同一過去走で複数該当しうるが、過去走 1 行ごとに
    「最高 rate のもの」のみ採用(over-counting 防止)。
 2. 同一 rule_id が複数走で発火 → 1 回までしか total に加算しない
-   (例: C13 が 5走前 と 3走前 で発火 → +50 一度のみ)。
+   (例: C13 が 8走前 と 3走前 で発火 → +50 一度のみ)。
 3. F2 救済(休養明け前走凡走)が発動した場合、評価対象を 2,3走前 に
    絞って C/D/E を再評価し、1 本でも該当すれば F2 自体も +15。
 4. F1 (ダ不良 + 逃げ) / F3 (1600m+ + 斤量-3kg) は当日コンテキストで判定。
@@ -340,7 +343,7 @@ def compute_ratings_for_race(
     horses_input は prediction_logic 側で組み立てた dict のリスト想定。
     必要キー: horse_id, horse_name, horse_number, frame_number, popularity,
               running_style, last_finishing_position, today_carry_weight
-    past_runs_by_horse[horse_id] が直近 5 走。
+    past_runs_by_horse[horse_id] が直近 10 走(v1.4、不足は None で末尾パディング)。
     """
     out: list[HorseRating] = []
     for h in horses_input:
