@@ -411,7 +411,7 @@ def _build_run_cell(run: dict | None, target_surface: str, target_distance: int)
 def _build_matrix_html_cached(
     cache_key: str,
     _race_card_df: pd.DataFrame,
-    _predictions_payload: tuple,
+    _predictions: list,
     _historical_df: pd.DataFrame,
 ) -> str:
     """マトリクス HTML 構築のキャッシュ版(perf)。
@@ -421,10 +421,19 @@ def _build_matrix_html_cached(
     でも中身を実行するため、34 レース分の HTML 構築コストが毎 rerun で
     かかっていた問題への対策。
 
-    _race_card_df / _predictions_payload / _historical_df は ハッシュ対象外。
+    引数:
+        cache_key: ハッシュ対象。file_hash + going + race_id 等の合成キー。
+        _race_card_df / _predictions / _historical_df: ハッシュ対象外
+            (`_` prefix)。pickle 経由で値は保持される。
+
+    fix(history): 旧実装は predictions を `(horse_id, mark, score)` タプル
+    のリストに変換していたが、消費側 `_build_matrix_html` が attribute
+    access(`p.horse_id`)を使っていたため AttributeError で落ちていた。
+    HorsePrediction は dataclass なので Streamlit の cache pickle で
+    そのまま保持できるため、変換を撤去し object のまま渡す方式に修正。
     """
     return _build_matrix_html(
-        _race_card_df, _predictions_payload, _historical_df,
+        _race_card_df, _predictions, _historical_df,
     )
 
 
@@ -547,18 +556,32 @@ def render_recent_runs_matrix(
     if race_card_df.empty:
         return
 
-    if cache_key:
-        # predictions は object なのでタプル化して識別子(horse_id, mark, score)
-        # だけをキャッシュ payload として渡す(中身は使わないが Streamlit 側で
-        # 引数同一性比較のため _ プレフィックスで除外する目的)
-        payload = tuple(
-            (str(p.horse_id), getattr(p, "mark", ""), getattr(p, "score", 0.0))
-            for p in predictions
+    # predictions は HorsePrediction(dataclass)のリスト想定。
+    # @st.cache_data の `_` prefix 引数で hash 対象外にしつつ pickle で値を
+    # 保持できるので、変換せずそのまま渡す。
+    # 旧実装の payload tuple 変換はここで AttributeError を起こしていた
+    # (消費側の _build_matrix_html が `p.horse_id` を attribute access する)。
+    predictions_list = list(predictions)
+    try:
+        if cache_key:
+            html = _build_matrix_html_cached(
+                cache_key, race_card_df, predictions_list, historical_df,
+            )
+        else:
+            html = _build_matrix_html(
+                race_card_df, predictions_list, historical_df,
+            )
+    except (AttributeError, TypeError, KeyError) as e:
+        # cache 周りの異常で落ちた場合でも予想結果セクション全体は止めない。
+        # cache 抜きで再構築を試み、それもダメなら静かに描画スキップ。
+        st.caption(
+            f"(直近5走戦歴マトリクスの描画でエラー: {type(e).__name__})"
         )
-        html = _build_matrix_html_cached(
-            cache_key, race_card_df, payload, historical_df,
-        )
-    else:
-        html = _build_matrix_html(race_card_df, predictions, historical_df)
+        try:
+            html = _build_matrix_html(
+                race_card_df, predictions_list, historical_df,
+            )
+        except Exception:
+            html = ""
     if html:
         st.markdown(html, unsafe_allow_html=True)
