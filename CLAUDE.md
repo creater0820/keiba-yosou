@@ -512,7 +512,7 @@ keiba-yosou/
   の iframe 経路を最初から使うこと(`st.markdown(unsafe_allow_html=True)`
   経由の `<script>` は 1.30+ で実行されない)。それでも UX に組み込む
   なら状態管理は最小化し、機能本体に影響しないよう完全に分離する。
-- **v1.7.1 UX**(現行、2026-05): **直近10走戦歴マトリクス UI を 10 列に
+- **v1.7.1 UX**(2026-05): **直近10走戦歴マトリクス UI を 10 列に
   完全追従**。v1.4 でロジック側の評価範囲を 5 走 → 10 走に拡張済みだったが、
   `utils/recent_runs_renderer.py` の HTML ヘッダが「前走〜5走前」の 5 列
   ハードコードのままで、データ列とヘッダ列がズレていた問題を修正:
@@ -522,6 +522,26 @@ keiba-yosou/
   * dc_past_runs 経路の `[None] * 5` パディングも `[None] * 10` に
   * 各馬の data 行で `runs` を必ず長さ 10 にパディング(短い馬の表崩れ防止)
   * docstring と error message の「直近5走」も「直近10走」に統一
-  検証: 11 個の `<th>` + 各馬 10 個の `<td class="run-cell">` で完全整列、
-  ヘッダラベル `['', '前走', '2走前', ..., '10走前']` を確認。
-  全 117 テスト pass、ロジック層・性能改善は無変更。
+- **v1.7.2 UX**(現行、2026-05): **マトリクスヘッダラベルの cache 無効化
+  問題を修正**。v1.7.1 でソース側を 10 列にしたが、`_build_matrix_html_cached`
+  の `@st.cache_data` が **5 走時代に生成された古い HTML を cache hit で
+  返し続けていた** ため、実機で「6〜10走前のヘッダラベルが空欄」のまま
+  表示される問題が発生していた。修正:
+  * `RENDERER_SCHEMA_VERSION = "v2-10runs"` 定数を導入し、`app.py` が
+    cache_key に組み込むようにした:
+    ```
+    f"matrix_{RENDERER_SCHEMA_VERSION}_{file_hash}_{going}_{race_id}"
+    ```
+    → スキーマ変更時に schema version を bump するだけで自動的に古い
+    キャッシュが無効化される(以降のヘッダ仕様変更も同じ要領で対応可能)。
+  * `RECENT_RUN_COUNT = 10` + `RECENT_RUN_HEADERS` 定数を導入してハード
+    コードを撤廃。`<thead>` 生成を `"".join(f"<th>{h}</th>" for h in
+    RECENT_RUN_HEADERS)` の 1 行ループに置換。
+  * 残っていた `[None] * 10` / `n=10` 等のマジックナンバーも全て
+    `RECENT_RUN_COUNT` 経由に統一。
+  * 再発防止のリグレッションテスト 2 件追加:
+    - `test_matrix_header_has_10_labeled_columns`: HTML に 2走前〜10走前
+      が全部含まれ、`<thead>` 内の `<th>` が 11 個であること
+    - `test_matrix_renderer_schema_version_present`: 定数が定義され空でない
+  検証: 全 119 テスト pass(既存 117 + 新規 2)、Streamlit 起動 smoke test
+  無エラー。ロジック層・性能改善は完全不変。
