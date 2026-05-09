@@ -446,19 +446,30 @@ keiba-yosou/
   暗転中は overlay が消えており、**描画完了直前 1 秒だけしか馬が見えない**
   問題があった(v1.6.1 で MutationObserver による検知も試みたが、新 DOM
   注入後にしか発火せず根本解決にならず)。
-- **v1.6.2 UX**(現行、2026-05): overlay を **CSS-first 方式** に再々書き
-  換え。JS で 1 度だけ `document.head` に `<style>`、`document.body` 直下
-  に `<div id="custom-loading-overlay">` を注入(`__horseOverlayInstalled`
-  フラグで二重注入防止)。表示制御は CSS の属性セレクタのみで実施:
-    `body:has([data-test-script-state="running"]) #custom-loading-overlay`
-    `body:has([data-test-script-state="rerunRequested"]) ...`
-    `body:has([data-stale="true"]) ...`
-    `body:has([data-testid="stStatusWidget"]) ...`
-  これで **rerun の暗転と同時に overlay が表示** され、Streamlit が ready
-  状態に戻った瞬間に消える(ブラウザネイティブ速度、JS observer 介在
-  なし)。`:has()` 非対応ブラウザ向けに最小 MutationObserver で
-  `body.__streamlit-running` クラスを toggle する fallback も併設。
-  z-index は 2147483647(int 最大値)で純正暗転より上、SVG/CSS/JS 合計
-  6.8 KB の inline 注入で外部 CDN 依存ゼロ。`app.py` 側は
-  `set_page_config` 直後に `render_running_horse_overlay()` を 1 回呼ぶ
-  だけで、placeholder / fragment 内の overlay 制御コードは全削除。
+- **v1.6.2 UX**(2026-05): overlay を CSS-first(`body:has(...)`)に書換え。
+  ただしページロード時や何でもない瞬間に overlay が常時表示される致命
+  バグ → v1.6.3 で撤回。
+- **v1.6.3 UX**(2026-05): ホワイトリスト方式(予想実行ボタン + 競馬場
+  ラジオ click 検出)に変更。常時表示は解消したが、click event listener
+  が React の `stopPropagation()` で発火しない / 即座に hide される問題で
+  実機では「馬が一切表示されない」状態に。
+- **v1.6.4 UX**(現行、2026-05): **状態機械 + 最小表示時間 + 多重イベント
+  + capture phase + Python 側フォールバック** で根本解決。
+  * 状態機械 `IDLE → SHOWN → MIN_TIME_PASSED → RUNNING_DETECTED → IDLE`
+    で **最低 800ms** は必ず表示(点滅して見えない問題回避)
+  * `running` を観測したら `running` 終了まで hide しない、観測なしなら
+    5 秒で見切り hide、暴走対策に 30 秒 safety hide
+  * `click` / `change` / `pointerdown` を **capture phase** で attach
+    (React の stopPropagation を回避)
+  * ボタンテキスト判定は `replace(/\s+/g, '')` で「予想実行」マッチ
+    (emoji 🎯 や全角空白に対応)
+  * ラジオは `<input type="radio">` / `<label>` 親 / `[role="radio"]` /
+    `[data-baseweb="radio"]` を全網羅、競馬場かは親 group text に
+    「競馬場」を含むかで判定
+  * `iframe` 両対応(`parent.document` を try → 失敗時 `document`)
+  * `console.log('[HorseOverlay]', ...)` で各段階を出力する DEBUG モード
+    搭載(`render_running_horse_overlay(debug=True)` で有効化)
+  * Python 側 `trigger_overlay_inline()` で予想実行ボタン handler から
+    `window.__showHorseOverlay()` を即時呼び出して保険。状態機械の早期
+    return で二重発火しても無害
+  * 注入合計 12.1 KB、`:has()` 不使用で常時表示バグの再発防止
