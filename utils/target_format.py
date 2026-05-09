@@ -430,10 +430,27 @@ def parse_dc_dataframe(
     race_number = pd.to_numeric(race_no_str, errors="coerce").astype("Int64")
     horse_number = pd.to_numeric(horse_no_str, errors="coerce").astype("Int64")
 
-    if target_date_iso:
-        date_str = target_date_iso
+    # ★ target_date_iso が None / 不正な場合のフォールバック処理。
+    # 旧コードは 「"20" + yy_code + "-00-00"」を組み立てていたが、yy_code は
+    # Series なので date_str も Series になり、後続の `if date_str` で
+    # 「The truth value of a Series is ambiguous」エラーが発生していた。
+    # ファイル名に DCYYMMDD 規則が無い実 CSV(「当日出馬表-XXX.CSV」等)で
+    # 顕在化したバグ。
+    #
+    # 安全な fallback:
+    #   1) 引数の target_date_iso が "YYYY-MM-DD" の文字列なら採用
+    #   2) そうでなければ「今日」(本実装時点の time.time)を使う
+    #      → date 推定誤差は ±数日だが historical 照合は ±3日許容なので
+    #         ほとんどのケースで OK
+    import datetime as _dt
+    if isinstance(target_date_iso, str) and len(target_date_iso) == 10:
+        try:
+            _dt.date.fromisoformat(target_date_iso)
+            date_str = target_date_iso
+        except ValueError:
+            date_str = _dt.date.today().isoformat()
     else:
-        date_str = "20" + yy_code + "-00-00"
+        date_str = _dt.date.today().isoformat()
 
     race_id = (
         "R" + date_str.replace("-", "")
@@ -483,7 +500,11 @@ def parse_dc_dataframe(
     })
 
     # ----- 過去走 7 走を辞書化(weeks_since_prior チェーンで race_date 推定) -----
-    target_dt = pd.Timestamp(date_str) if date_str and "00" not in date_str.split("-")[-1] else None
+    # date_str は上の fallback で必ず正規 ISO 文字列(YYYY-MM-DD)になっている
+    try:
+        target_dt = pd.Timestamp(date_str)
+    except (ValueError, TypeError):
+        target_dt = None
 
     past_runs_by_horse: dict[str, list[dict | None]] = {}
     for idx, row in raw.iterrows():

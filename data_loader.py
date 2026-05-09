@@ -200,9 +200,22 @@ def load_race_card(
             low_memory=False,
         )
         target_date_iso = _infer_target_date_from_dc_filename(filename)
-        race_card_df, past_runs_by_horse = parse_dc_dataframe(
-            raw_df, target_date_iso=target_date_iso,
-        )
+        # parse_dc_dataframe は内部で try/except + None fallback で堅牢化済みだが、
+        # 万一の例外もここでキャッチして お父様向けの分かりやすい日本語メッセージで
+        # 包む(過去に「Series ambiguous truth value」のような技術的英語例外が
+        # 表面化した経緯あり、commit 4db8ce1 後の実 CSV で発覚)。
+        try:
+            race_card_df, past_runs_by_horse = parse_dc_dataframe(
+                raw_df, target_date_iso=target_date_iso,
+            )
+        except Exception as e:
+            raise ValueError(
+                f"DC 形式の CSV を読み込みましたが、内部解析でエラーが発生しました。\n"
+                f"ファイル名: {filename or '(不明)'}\n"
+                f"内部エラー: {type(e).__name__}: {e}\n\n"
+                f"対処方法: お手数ですが、TARGET frontier JV からの再エクスポートを"
+                f"お試しください(同じ DC メニューで OK)。"
+            ) from e
         race_card_df.attrs["data_format"] = "dc"
         race_card_df.attrs["dc_past_runs"] = past_runs_by_horse
         race_card_df.attrs["source_filename"] = filename or ""
