@@ -46,8 +46,17 @@ data/historical/pedigree.parquet:
   horse_id, sire_line, broodmare_sire_line, inbreeding_score
 
 ### 当日データ(お父様がアップロード、CSV形式)
-- 当日出馬表(JV-Link または TARGET frontier JV のエクスポート形式)
+- 当日出馬表(JV-Link または TARGET frontier JV のエクスポート形式、必須)
 - 列構造は過去データの races と概ね同一
+- **坂路調教 CSV(任意、v1.5 で追加)**: TARGET frontier JV から出力する
+  日次の坂路調教時計 CSV(Shift_JIS、18 列、ヘッダーあり)
+  - 列: 場所, 年月日, 曜日, 時刻, 馬名, Ｃ, 性別, 年齢, 収得賞金,
+        調教師, Time1, Time2, Time3, Time4, Lap4, Lap3, Lap2, Lap1
+  - **Lap1** = 1F→0F(ゴール直前 1F、F4 判定で使用)
+  - **Lap2** = 2F→1F(その前の 1F、F5 判定の追加条件)
+  - 馬名マッチで当日出馬表に紐付け、target_date 以前の最新調教を採用
+  - パース: `utils/training_data.py` の `parse_training_csv` /
+    `match_training_to_horses` / `evaluate_f4_f5`
 
 ## MVP機能(初回リリース)
 1. 当日出馬表CSVのドラッグ&ドロップアップロード
@@ -87,8 +96,8 @@ data/historical/pedigree.parquet:
 | F1 | 1 | 〇 | 30 | ダート不良 + 逃げ脚質 |
 | F2 | 1 | 〇 | 15 | 休養明け前走凡走 → 2,3走前で C/D/E 救済 |
 | F3 | 1 | 〇 | 20 | 1600m以上 + 斤量 -3kg(前走比) |
-| F4 | 1 | (TODO) | 30 | 坂路調教 1F ≤ 11.2(調教データ未取得) |
-| F5 | 1 | (TODO) | 40 | 坂路調教 1F + 2F ≤ 11.2(同上) |
+| F4 | 1 | 〇 | 30 | 坂路調教 1F(Lap1) ≤ 11.2(v1.5 で実装) |
+| F5 | 1 | 〇 | 40 | 坂路調教 1F + 2F ≤ 11.2(F4 排他、F5 が +40)|
 | A1 | 1 | × | 2 | 1番人気枠の偶奇でワイド候補絞り込み |
 | A2-A5 | 4 | × | 4-30 | ワイド候補フラグ + priority weight |
 | B1 | 1 | × | 25 | 1番人気の逃げ → 2着以下扱い(◎除外) |
@@ -415,6 +424,11 @@ keiba-yosou/
 - **v1.2**: DC ハイブリッドモード(TARGET 指数 ベースライン + ルール加算、◎閾値 200)
 - **v1.3**: 純粋ロジックモード(TARGET 指数を rating から除外、◎閾値を 100 に統一、
   TARGET 指数は参考値として UI 表示のみ)
-- **v1.4**(現行、2026-05): ルール評価対象を直近 5 走 → **直近 10 走** に拡張
+- **v1.4**(2026-05): ルール評価対象を直近 5 走 → **直近 10 走** に拡張
   (ベテラン馬の長期実績を拾う)。脚質判定は引き続き直近 5 走の corner_1 平均、
   戦歴マトリクス UI も 5 走表示のまま。
+- **v1.5**(現行、2026-05): 坂路調教 CSV(任意)を二段アップローダで受け付け、
+  `utils/training_data.py` でパース → 馬名マッチ → **F4(+30) / F5(+40)** を
+  実発火させる。坂路 CSV 未アップロード時は missed_rule_ids にだけ入れて
+  「坂路調教 CSV 未提供のためスキップ」表示。F4/F5 は v1.0〜v1.4 まで TODO で
+  永続無効だった。

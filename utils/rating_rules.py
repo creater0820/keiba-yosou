@@ -248,26 +248,29 @@ RATING_RULES_F: list[RatingRule] = [
         rule_id="F4",
         category="F",
         rate=30,
-        title="坂路調教 1F ≤ 11.2(TODO: 調教データ未取得)",
+        title="坂路調教 1F(Lap1)≤ 11.2",
         description=(
-            "TODO: TARGET frontier JV のデフォルトエクスポートには調教時計が"
-            "含まれていないため評価不能。データソース拡張時に enabled=True に"
-            "切り替えれば自動的に rating engine が評価する。"
+            "**v1.5 で実装**。お父様が別途アップロードする坂路調教 CSV を"
+            "utils/training_data.py が読み、馬名で当日出馬表とマッチングして"
+            "Lap1(ゴール直前 1F)≤ 11.2 秒で +30 加点。F5 と同時に該当する"
+            "場合は F5 排他で F4 は採用しない(F5 が +40 で上位)。"
+            "坂路 CSV 未アップロード時は永続無効(missed_rule_ids 入り)。"
         ),
         contributes_to_rating=True,
-        enabled=False,
+        enabled=True,
     ),
     RatingRule(
         rule_id="F5",
         category="F",
         rate=40,
-        title="坂路調教 1F + 2F ともに ≤ 11.2(TODO: 調教データ未取得)",
+        title="坂路調教 1F + 2F ともに ≤ 11.2",
         description=(
-            "TODO: F4 と同じ理由で未対応。同馬の同調教で 1F・2F 両方が"
-            "11.2秒 以下なら +40(F4 と F5 が同時発火する場合は spec 通り両方加算)。"
+            "**v1.5 で実装**。坂路調教 Lap1(直前 1F)と Lap2(その前の 1F)"
+            "両方が 11.2 秒以下なら +40。1F だけならば F4(+30)、両方なら"
+            "F5(+40、F4 排他)。坂路 CSV 未アップロード時は永続無効。"
         ),
         contributes_to_rating=True,
-        enabled=False,
+        enabled=True,
     ),
 ]
 

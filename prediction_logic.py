@@ -236,17 +236,24 @@ def predict_race_v2(
     race_card_df: pd.DataFrame,
     historical: HistoricalData | pd.DataFrame,
     target_date: str | None = None,
+    *,
+    training_match: dict[str, dict] | None = None,
 ) -> RacePrediction:
-    """1レース分の v1.1 予想を実行する(rating 方式、≥100 で ◎)。
+    """1レース分の v1.1+ 予想を実行する(rating 方式、≥100 で ◎)。
 
     内部ロジック:
     1. 各馬の HorseMarkData を組み立て(基本属性 + 直近10走履歴 ※脚質判定は head5)
     2. その馬の今日の斤量を race_card から取得
-    3. compute_horse_rating で C/D/E/F1/F2/F3 を評価して total_rating
+    3. compute_horse_rating で C/D/E/F1/F2/F3/F4/F5 を評価して total_rating
     4. determine_main_pick_v2 (≥100 で◎、減点 B1/B2 適用、準◎ fallback)
     5. extract_wide_candidates_v2 (A2-A5 で最大3頭)
     6. 買い目生成は既存 v1 ヘルパを再利用(HorseMarkData 互換のため
        馬基本情報は HorseMarkData 経由で渡す)
+
+    引数(v1.5 追加):
+        training_match: utils/training_data.match_training_to_horses の戻り値。
+                        {horse_id: {"lap1": float, "lap2": float, ...}}
+                        None なら F4/F5 永続無効(missed_rule_ids 入り)。
     """
     if isinstance(historical, HistoricalData):
         hist_df = historical.races
@@ -276,10 +283,11 @@ def predict_race_v2(
                 cw = None
             carry_by_id[str(row["horse_id"])] = cw
 
-    # 4) 各馬の rating を計算
+    # 4) 各馬の rating を計算(training_match があれば F4/F5 評価も走る)
     horse_ratings: list[HorseRating] = []
     for h in horses_v1:
         runs = history.get(h.horse_id, [None] * 10)
+        td = training_match.get(h.horse_id) if training_match else None
         rating = compute_horse_rating(
             horse_id=h.horse_id,
             horse_name=h.horse_name,
@@ -291,6 +299,7 @@ def predict_race_v2(
             today_carry_weight=carry_by_id.get(h.horse_id),
             past_runs=runs,
             race_meta=meta,
+            training_data=td,
         )
         horse_ratings.append(rating)
 
@@ -325,8 +334,10 @@ def predict_race_dc(
     race_card_df: pd.DataFrame,
     historical: HistoricalData | pd.DataFrame,
     target_date: str | None = None,
+    *,
+    training_match: dict[str, dict] | None = None,
 ) -> RacePrediction:
-    """DC 形式 CSV 専用の予想(v1.2 ハイブリッドモード)。
+    """DC 形式 CSV 専用の予想(v1.5 純粋ロジックモード + 坂路 F4/F5)。
 
     動作モード(レース内の馬ごとに自動切替):
     - **フルモード**: 過去走パターンマッチで historical horse_id が特定でき、
@@ -406,6 +417,7 @@ def predict_race_dc(
             full_mode_count += 1
             running_style = determine_running_style(runs)
             last_pos = runs[0].get("finishing_position") if runs and runs[0] else None
+            td = training_match.get(hid) if training_match else None
             rule_obj = compute_horse_rating(
                 horse_id=hid,
                 horse_name=str(row["horse_name"]),
@@ -417,6 +429,7 @@ def predict_race_dc(
                 today_carry_weight=None,  # DC は当日斤量持たず F3 は永続無効
                 past_runs=runs,
                 race_meta=meta,
+                training_data=td,
             )
             rating_obj = HorseRating(
                 horse_id=rule_obj.horse_id,
@@ -507,19 +520,29 @@ def predict_race(
     target_date: str | None = None,
     *,
     mode: str | None = None,
+    training_match: dict[str, dict] | None = None,
 ) -> RacePrediction:
     """データ形式と LOGIC_MODE に従って予想関数を dispatch。
 
     DC 形式(race_card_df.attrs["data_format"] == "dc")が最優先で、
     TARGET 指数ベースの簡易予想 (predict_race_dc) を起動する。
     それ以外は LOGIC_MODE / mode 引数で v1 / v2 を切り替え。
+
+    training_match (v1.5): 坂路調教マッチ結果。F4/F5 評価に使う。None 可。
     """
     if race_card_df.attrs.get("data_format") == "dc":
-        return predict_race_dc(race_card_df, historical, target_date)
+        return predict_race_dc(
+            race_card_df, historical, target_date,
+            training_match=training_match,
+        )
 
     chosen = mode or LOGIC_MODE
     if chosen == "rating":
-        return predict_race_v2(race_card_df, historical, target_date)
+        return predict_race_v2(
+            race_card_df, historical, target_date,
+            training_match=training_match,
+        )
+    # onmark v1.0 は F4/F5 を持たないので training_match は無視
     return predict_race_v1(race_card_df, historical, target_date)
 
 
@@ -528,11 +551,16 @@ def predict_all_races_v1(
     historical: HistoricalData | pd.DataFrame,
     *,
     mode: str | None = None,
+    training_match: dict[str, dict] | None = None,
 ) -> dict[str, RacePrediction]:
     """出馬表全体を race_id 単位で予想する(LOGIC_MODE / mode 引数で切替)。
 
     pandas の groupby は df.attrs を子グループに伝播しないため、ここで明示的に
     attrs(data_format / dc_past_runs)をコピーして predict_race に渡す。
+
+    training_match (v1.5): 全馬の坂路調教マッチ結果(horse_id → dict)。
+    レース単位で predict_race に渡される(各レースは自馬の training_data
+    だけ参照する)。
     """
     parent_attrs = dict(race_card_df.attrs or {})
     results: dict[str, RacePrediction] = {}
@@ -540,7 +568,10 @@ def predict_all_races_v1(
         # groupby 後の group には attrs が乗っていないので親の attrs を引き継ぐ
         group.attrs = parent_attrs
         target_date = str(group["race_date"].iloc[0])
-        results[str(race_id)] = predict_race(group, historical, target_date, mode=mode)
+        results[str(race_id)] = predict_race(
+            group, historical, target_date,
+            mode=mode, training_match=training_match,
+        )
     return results
 
 
@@ -555,9 +586,18 @@ def predict_all_races_cached(
     race_card_hash: str,
     _race_card_df: pd.DataFrame,
     _historical: HistoricalData,
+    training_hash: str = "",
+    _training_match: dict[str, dict] | None = None,
 ) -> dict[str, RacePrediction]:
     """
-    race_card_hash でキャッシュされる v1.0 予想エントリポイント。
-    _race_card_df と _historical は ハッシュ対象外(_ 接頭辞)。
+    race_card_hash + training_hash でキャッシュされる予想エントリポイント。
+    _race_card_df / _historical / _training_match は _ 接頭辞でハッシュ対象外。
+
+    v1.5: training_hash と _training_match を追加。
+    training_hash が空文字なら坂路 CSV 未アップロード扱い(F4/F5 永続無効)。
+    別の training CSV をアップロードすると hash が変わり、キャッシュミスして
+    再計算される。
     """
-    return predict_all_races_v1(_race_card_df, _historical)
+    return predict_all_races_v1(
+        _race_card_df, _historical, training_match=_training_match,
+    )

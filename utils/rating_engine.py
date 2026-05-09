@@ -185,6 +185,7 @@ def compute_horse_rating(
     past_runs: list[dict | None],
     race_meta: dict,
     policy: str = DEFAULT_POLICY,
+    training_data: dict | None = None,
 ) -> HorseRating:
     """
     1 頭分の rating 計算を実行する。
@@ -199,6 +200,10 @@ def compute_horse_rating(
                    v1.4 で 5 → 10 走に拡張。脚質判定は別経路で head5。
         race_meta: 当日レース情報(distance, surface, going, racecourse, race_number)
         policy: RatingPolicy.STRICT(デフォルト)or SUM_ALL
+        training_data: v1.5 で追加。坂路調教 1F/2F の lap1/lap2 を持つ
+                       dict(utils/training_data.match_training_to_horses の
+                       1 馬分戻り値)。None なら F4/F5 は永続無効
+                       (missed_rule_ids にだけ入る)。
 
     戻り値: HorseRating(total_rating, matched=list[RatingHit], ...)
     """
@@ -297,8 +302,31 @@ def compute_horse_rating(
         matched.append(RatingHit(rule_id="F3", rate=20, reason=reason, run_idx=-1))
         credited_rule_ids.add("F3")
 
-    # ----- F4 / F5: 坂路調教 — 現状データ無しのためスキップ(rating_rules で enabled=False) -----
-    # データソースが拡張されたらこのファイルに F4/F5 の判定を追加する。
+    # ----- F4 / F5: 坂路調教(v1.5 で実装) -----
+    # training_data が None(坂路 CSV 未アップロード)→ 永続無効、ただし
+    # missed_rule_ids には入れて UI で「データ未提供のためスキップ」と表示。
+    # training_data あり → utils.training_data.evaluate_f4_f5 で発火判定。
+    # F5 が発火するなら F4 は加算しない(F5 排他、+40 のみ)。
+    from utils.training_data import evaluate_f4_f5  # 遅延 import で循環回避
+
+    if training_data is None:
+        # 坂路データ無し: 評価試行ログだけ残してスキップ
+        evaluated_rule_ids.add("F4")
+        evaluated_rule_ids.add("F5")
+    else:
+        f_rule, f_rate, f_reason = evaluate_f4_f5(training_data)
+        evaluated_rule_ids.add("F4")
+        evaluated_rule_ids.add("F5")
+        if f_rule == "F5":
+            matched.append(RatingHit(
+                rule_id="F5", rate=f_rate, reason=f_reason, run_idx=-1,
+            ))
+            credited_rule_ids.add("F5")
+        elif f_rule == "F4":
+            matched.append(RatingHit(
+                rule_id="F4", rate=f_rate, reason=f_reason, run_idx=-1,
+            ))
+            credited_rule_ids.add("F4")
 
     # ----- 合計 rating(contributes_to_rating=True のもののみ) -----
     total = 0
