@@ -240,7 +240,7 @@ def predict_race_v2(
     """1レース分の v1.1 予想を実行する(rating 方式、≥100 で ◎)。
 
     内部ロジック:
-    1. 各馬の HorseMarkData を組み立て(基本属性 + 直近5走履歴)
+    1. 各馬の HorseMarkData を組み立て(基本属性 + 直近10走履歴 ※脚質判定は head5)
     2. その馬の今日の斤量を race_card から取得
     3. compute_horse_rating で C/D/E/F1/F2/F3 を評価して total_rating
     4. determine_main_pick_v2 (≥100 で◎、減点 B1/B2 適用、準◎ fallback)

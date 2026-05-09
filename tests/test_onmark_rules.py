@@ -7,7 +7,7 @@
 Phase 2 の対象範囲:
 - Rules 9〜22(評価関数の挙動)
 - Rule 24(休養明け検出)
-- collect_onmarks(直近5走全評価 + Rule 24 救済)
+- collect_onmarks(v1.4 で直近10走全評価 + Rule 24 救済)
 """
 
 from __future__ import annotations

@@ -385,7 +385,7 @@ def find_rating_rule(rule_id: str) -> RatingRule | None:
 # 100 点以上で ◎本命確定
 HONMEI_RATING_THRESHOLD: int = 100
 
-# 同 rule_id は直近5走中で 1回まで(rating_engine 側で実装)
+# 同 rule_id は直近10走中で 1回まで(rating_engine 側で実装、v1.4)
 RULE_DEDUP_PER_HORSE: bool = True
 
 # C/D/E 排他処理(過去走 1 行で C/D/E が複数該当 → 最高 rate のみ採用)
