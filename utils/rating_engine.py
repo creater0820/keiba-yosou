@@ -302,21 +302,30 @@ def compute_horse_rating(
         matched.append(RatingHit(rule_id="F3", rate=20, reason=reason, run_idx=-1))
         credited_rule_ids.add("F3")
 
-    # ----- F4 / F5: 坂路調教(v1.5 で実装) -----
+    # ----- F4 / F5: 坂路調教(v1.5 で実装、v1.7.5 で閾値緩和) -----
     # training_data が None(坂路 CSV 未アップロード)→ 永続無効、ただし
     # missed_rule_ids には入れて UI で「データ未提供のためスキップ」と表示。
     # training_data あり → utils.training_data.evaluate_f4_f5 で発火判定。
     # F5 が発火するなら F4 は加算しない(F5 排他、+40 のみ)。
-    from utils.training_data import evaluate_f4_f5  # 遅延 import で循環回避
+    #
+    # v1.7.5.1: F4/F5 が credited されたら追加で穴馬ボーナスを評価
+    # (人気 ≥ 6 番で F4穴 +15 / F5穴 +20)
+    from utils.training_data import (  # 遅延 import で循環回避
+        evaluate_f4_f5, evaluate_f4_f5_hole,
+    )
 
     if training_data is None:
         # 坂路データ無し: 評価試行ログだけ残してスキップ
         evaluated_rule_ids.add("F4")
         evaluated_rule_ids.add("F5")
+        evaluated_rule_ids.add("F4穴")
+        evaluated_rule_ids.add("F5穴")
     else:
         f_rule, f_rate, f_reason = evaluate_f4_f5(training_data)
         evaluated_rule_ids.add("F4")
         evaluated_rule_ids.add("F5")
+        evaluated_rule_ids.add("F4穴")
+        evaluated_rule_ids.add("F5穴")
         if f_rule == "F5":
             matched.append(RatingHit(
                 rule_id="F5", rate=f_rate, reason=f_reason, run_idx=-1,
@@ -327,6 +336,14 @@ def compute_horse_rating(
                 rule_id="F4", rate=f_rate, reason=f_reason, run_idx=-1,
             ))
             credited_rule_ids.add("F4")
+
+        # 穴馬ボーナス(F4/F5 が credited された後で popularity ≥ 6 を判定)
+        h_rule, h_rate, h_reason = evaluate_f4_f5_hole(f_rule, popularity)
+        if h_rule:
+            matched.append(RatingHit(
+                rule_id=h_rule, rate=h_rate, reason=h_reason, run_idx=-1,
+            ))
+            credited_rule_ids.add(h_rule)
 
     # ----- 合計 rating(contributes_to_rating=True のもののみ) -----
     total = 0

@@ -132,6 +132,59 @@ def test_evaluate_threshold_constants():
 
 
 # ==================================================================
+# F4穴 / F5穴(v1.7.5.1)— F4/F5 該当 + 人気 ≥ 6 番で追加加点
+# ==================================================================
+def test_f5_hole_fires_at_popularity_6():
+    """F5 該当 + 6番人気ジャスト → F5穴(+20)発火。"""
+    from utils.training_data import evaluate_f4_f5_hole
+    rule, rate, _ = evaluate_f4_f5_hole("F5", 6)
+    assert rule == "F5穴"
+    assert rate == 20
+
+
+def test_f4_hole_fires_at_popularity_8():
+    """F4 該当 + 8番人気 → F4穴(+15)発火。"""
+    from utils.training_data import evaluate_f4_f5_hole
+    rule, rate, _ = evaluate_f4_f5_hole("F4", 8)
+    assert rule == "F4穴"
+    assert rate == 15
+
+
+def test_hole_does_not_fire_at_popularity_5():
+    """F4/F5 該当 + 5番人気以内 → 穴馬ボーナスなし(本命級は除外)。"""
+    from utils.training_data import evaluate_f4_f5_hole
+    assert evaluate_f4_f5_hole("F5", 5) == (None, 0, None)
+    assert evaluate_f4_f5_hole("F5", 1) == (None, 0, None)
+    assert evaluate_f4_f5_hole("F4", 3) == (None, 0, None)
+
+
+def test_hole_does_not_fire_when_no_base_rule():
+    """F4/F5 が発火していない馬には穴ボーナスを適用しない。"""
+    from utils.training_data import evaluate_f4_f5_hole
+    assert evaluate_f4_f5_hole(None, 8) == (None, 0, None)
+    assert evaluate_f4_f5_hole("", 8) == (None, 0, None)
+
+
+def test_hole_skips_unknown_popularity():
+    """popularity が None / 0(取り込み未済)→ 穴ボーナス不発。"""
+    from utils.training_data import evaluate_f4_f5_hole
+    assert evaluate_f4_f5_hole("F5", None) == (None, 0, None)
+    assert evaluate_f4_f5_hole("F5", 0) == (None, 0, None)
+
+
+def test_hole_constants():
+    """v1.7.5.1 の定数値が想定通り。"""
+    from utils.training_data import (
+        F_HOLE_MIN_POPULARITY, F4_HOLE_BONUS, F5_HOLE_BONUS,
+    )
+    assert F_HOLE_MIN_POPULARITY == 6
+    assert F4_HOLE_BONUS == 15
+    assert F5_HOLE_BONUS == 20
+    # F5穴 > F4穴(より厳しい条件には大きい加点)
+    assert F5_HOLE_BONUS > F4_HOLE_BONUS
+
+
+# ==================================================================
 # parse_training_csv: Shift_JIS デコード + 列リネーム
 # ==================================================================
 def _make_sjis_csv() -> bytes:
