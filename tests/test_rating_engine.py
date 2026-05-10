@@ -150,7 +150,7 @@ def test_C1_fires_on_turf_short_dry_under_threshold():
     r = _compute(past_runs=[run] + _empty_runs(4),
                  race_meta=_meta(distance=1400, surface="芝", going="良"))
     assert "C1" in _rule_ids(r), f"C1 が発火するはず: {_rule_ids(r)}"
-    assert r.total_rating >= 50, "C1 だけで +50 以上"
+    assert r.total_rating >= 50, "C1 単独で +50(v1.8.0 第 2 案で 50 維持)"
 
 
 def test_C7_fires_on_turf_long_dry_with_corner():
@@ -215,11 +215,11 @@ def test_cde_exclusion_prefers_C_over_D_and_E():
     assert "C1" in ids, "C1 が選ばれる"
     assert "D1" not in ids, "STRICT で D1 は弾かれる"
     assert "E1" not in ids, "STRICT で E1 は弾かれる"
-    assert r.total_rating == 50
+    assert r.total_rating == 50  # v1.8.0 第 2 案: C 50 維持
 
 
 def test_cde_exclusion_in_sum_all_keeps_all():
-    """SUM_ALL ポリシーでは C/D/E 全部加算される。"""
+    """SUM_ALL ポリシーでは C/D/E 全部加算される(v1.8.0: 45 + 20 + 25 = 90)。"""
     run = _run(
         surface="芝", distance=1400, going="良",
         last_3f=33.0, racecourse="東京",
@@ -235,7 +235,8 @@ def test_cde_exclusion_in_sum_all_keeps_all():
     )
     ids = _rule_ids(r)
     assert {"C1", "D1", "E1"}.issubset(ids), f"SUM_ALL では全部発火: {ids}"
-    assert r.total_rating == 50 + 20 + 20  # 90 点
+    # v1.8.0 第 2 案: C=50 + D=20 + E=25 = 95
+    assert r.total_rating == 50 + 20 + 25
 
 
 # ==================================================================
@@ -389,7 +390,7 @@ def test_under_100_falls_back_to_sub_pick():
     j = determine_main_pick_v2([h_50, h_0], _meta(distance=1400))
     assert j.main_pick is None, "誰も ≥100 ではない"
     assert j.sub_pick == "mid", f"最高 rating 馬が準◎: {j.sub_pick}"
-    assert j.sub_pick_marks == 50
+    assert j.sub_pick_marks == 50  # v1.8.0 第 2 案: C 50 維持
 
 
 # ==================================================================
@@ -455,6 +456,28 @@ def test_A3_previous_5th_marks_wide_candidate():
     assert any(w.horse_id == "x5" for w in wides), "A3 でワイド候補化"
     matched = next(w for w in wides if w.horse_id == "x5").matched_rules
     assert "A3" in matched
+
+
+# ==================================================================
+# v1.8.0: C穴 / D穴 / E穴 は第 1 案バックテストで悪化したため撤回。
+# ロジックは rating_engine.py で発火停止、説明だけ rating_rules.py に残す。
+# ==================================================================
+def test_no_cde_hole_after_v180_revert():
+    """v1.8.0 第 2 案: C穴/D穴/E穴 は撤回されたので発火しないことを確認。"""
+    run = _run(
+        surface="芝", distance=1400, going="良",
+        last_3f=33.0, racecourse="東京",
+        corners=(10, 5, 3, 2),
+    )
+    r = _compute(past_runs=[run] + _empty_runs(4),
+                 race_meta=_meta(distance=1400, surface="芝", going="良"),
+                 popularity=10)  # 大穴人気
+    ids = _rule_ids(r)
+    assert "C1" in ids, "C は発火すること自体は保持"
+    # 穴系は撤回されたので発火しない
+    assert "C穴" not in ids, "v1.8.0 第 2 案で撤回"
+    assert "D穴" not in ids
+    assert "E穴" not in ids
 
 
 # ==================================================================
