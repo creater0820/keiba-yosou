@@ -29,7 +29,29 @@ from typing import Any
 import pandas as pd
 
 
-F4_F5_THRESHOLD = 11.2  # 1F ラップの F4/F5 発火閾値(秒)。≤ で含む。
+# =====================================================================
+# F4 / F5 発火閾値(v1.7.5 で実測ベースに緩和)
+# =====================================================================
+# 旧: 単一閾値 11.2 秒(業界トップ 1-2%)→ 実測 2265 サンプルで発火 0 件、
+#     穴馬検出ルールとして機能していなかった
+# 新: 実 CSV(坂路_20260509、2265 行)のパーセンタイル分析に基づき:
+#   - F5(上位 ~12%): lap1 ≤ 12.3 秒 **OR** lap1+lap2 ≤ 24.8 秒
+#   - F4(上位 ~25%): lap1 ≤ 12.5 秒 **OR** lap1+lap2 ≤ 25.4 秒
+# F5 と F4 は排他(F5 該当馬は F4 を加算しない、+40 のみ)。
+#
+# 参考: lap1 分布(p1=11.9, p5=12.2, p10=12.3, p25=12.6, p50=13.1, max=17.4)
+#       lap1+lap2 分布(p1=24.2, p5=24.62, p10=25.0, p25=25.7, p50=26.6)
+#
+# F4_F5_THRESHOLD は廃止予定だが下位互換のため残置(値も 11.2 のまま)。
+F4_F5_THRESHOLD = 11.2  # legacy、参照箇所なくなり次第削除
+
+# F5 (+40): 上位 ~12%、好調〜抜群の調教時計
+F5_LAP1_THRESHOLD = 12.3
+F5_LAP_2F_TOTAL_THRESHOLD = 24.8  # = lap1 + lap2
+
+# F4 (+30): 上位 ~25%、好調以上
+F4_LAP1_THRESHOLD = 12.5
+F4_LAP_2F_TOTAL_THRESHOLD = 25.4
 
 # 入力 CSV の日本語列名 → 内部使用の英名マッピング
 _COLUMN_RENAME = {
@@ -235,18 +257,25 @@ def _safe_float(v: Any) -> float | None:
 def evaluate_f4_f5(
     training: dict | None,
 ) -> tuple[str | None, int, str | None]:
-    """1 頭分の training データから F4 / F5 を評価する。
+    """1 頭分の training データから F4 / F5 を評価する(v1.7.5 緩和版)。
 
     引数:
         training: match_training_to_horses 戻り値の 1 馬分 dict。None 可。
 
     戻り値:
         (rule_id, rate, reason) のタプル。
-        - F5 発火: lap1 ≤ 11.2 AND lap2 ≤ 11.2 → ("F5", 40, 理由文字列)
-        - F4 発火: lap1 ≤ 11.2 のみ           → ("F4", 30, 理由文字列)
+        - F5 発火: lap1 ≤ 12.3 OR lap1+lap2 ≤ 24.8 → ("F5", 40, 理由文字列)
+        - F4 発火: lap1 ≤ 12.5 OR lap1+lap2 ≤ 25.4 → ("F4", 30, 理由文字列)
+                   ただし F5 発火時は F4 にフォールスルーしない
         - 不発: (None, 0, None)
-        F5 が発火する場合は F4 は **採用しない**(F5 が排他、+40 のみ)。
-        境界値 11.2 ジャストは ≤ なので発火する。
+
+    閾値根拠:
+        実 CSV(2265 サンプル)のパーセンタイル分析:
+          lap1: p10=12.3, p25=12.6, p50=13.1
+          lap1+lap2: p10=25.0, p25=25.7
+        旧閾値 11.2 では発火 0 件で穴馬検出ルールとして機能不全だった。
+        緩和後の発火率: F5 約 12% / F4 約 13%(F5 排他後)。
+        境界値(12.3 / 24.8 / 12.5 / 25.4)ジャストは ≤ なので発火する。
     """
     if not training:
         return None, 0, None
@@ -256,15 +285,40 @@ def evaluate_f4_f5(
 
     if lap1 is None:
         return None, 0, None
-    if lap1 > F4_F5_THRESHOLD:
-        return None, 0, None
 
-    # ここまで lap1 ≤ 11.2 確定
-    if lap2 is not None and lap2 <= F4_F5_THRESHOLD:
-        reason = f"坂路 1F = {lap1:.1f} + 2F = {lap2:.1f}(両方 ≤ {F4_F5_THRESHOLD})"
+    # lap1+lap2(直前 2F 累積)を計算(lap2 が None の場合は計算不能)
+    lap_2f_total = (lap1 + lap2) if (lap2 is not None) else None
+
+    # F5 判定(優先)
+    f5_lap1_ok = lap1 <= F5_LAP1_THRESHOLD
+    f5_lap2tot_ok = (
+        lap_2f_total is not None and lap_2f_total <= F5_LAP_2F_TOTAL_THRESHOLD
+    )
+    if f5_lap1_ok or f5_lap2tot_ok:
+        lap2_str = f"{lap2:.1f}" if lap2 is not None else "-"
+        if f5_lap1_ok and f5_lap2tot_ok:
+            why = f"1F={lap1:.1f}≤{F5_LAP1_THRESHOLD} かつ 1F+2F={lap_2f_total:.1f}≤{F5_LAP_2F_TOTAL_THRESHOLD}"
+        elif f5_lap1_ok:
+            why = f"1F={lap1:.1f}≤{F5_LAP1_THRESHOLD}"
+        else:
+            why = f"1F+2F={lap_2f_total:.1f}≤{F5_LAP_2F_TOTAL_THRESHOLD}"
+        reason = f"坂路 {why}(2F={lap2_str})"
         return "F5", 40, reason
 
-    # F4 単独
-    lap2_str = f"{lap2:.1f}" if lap2 is not None else "-"
-    reason = f"坂路 1F = {lap1:.1f} ≤ {F4_F5_THRESHOLD}(2F = {lap2_str})"
-    return "F4", 30, reason
+    # F4 判定(F5 が発火しなかった時のみ)
+    f4_lap1_ok = lap1 <= F4_LAP1_THRESHOLD
+    f4_lap2tot_ok = (
+        lap_2f_total is not None and lap_2f_total <= F4_LAP_2F_TOTAL_THRESHOLD
+    )
+    if f4_lap1_ok or f4_lap2tot_ok:
+        lap2_str = f"{lap2:.1f}" if lap2 is not None else "-"
+        if f4_lap1_ok and f4_lap2tot_ok:
+            why = f"1F={lap1:.1f}≤{F4_LAP1_THRESHOLD} かつ 1F+2F={lap_2f_total:.1f}≤{F4_LAP_2F_TOTAL_THRESHOLD}"
+        elif f4_lap1_ok:
+            why = f"1F={lap1:.1f}≤{F4_LAP1_THRESHOLD}"
+        else:
+            why = f"1F+2F={lap_2f_total:.1f}≤{F4_LAP_2F_TOTAL_THRESHOLD}"
+        reason = f"坂路 {why}(2F={lap2_str})"
+        return "F4", 30, reason
+
+    return None, 0, None

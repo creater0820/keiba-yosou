@@ -27,50 +27,87 @@ from utils.training_data import (
 
 
 # ==================================================================
-# F4 / F5 評価(境界値 + 排他)
+# F4 / F5 評価(v1.7.5 緩和版: F5 lap1≤12.3 OR lap1+lap2≤24.8、
+#                              F4 lap1≤12.5 OR lap1+lap2≤25.4)
 # ==================================================================
-def test_evaluate_f5_both_below_threshold():
-    """lap1 ≤ 11.2 AND lap2 ≤ 11.2 → F5(+40)発火、F4 は採用しない。"""
-    rule, rate, reason = evaluate_f4_f5({"lap1": 11.0, "lap2": 11.0})
+def test_evaluate_f5_lap1_below_threshold():
+    """lap1 ≤ 12.3 → F5(+40)発火(F5 が優先で F4 にはフォールスルーしない)。"""
+    rule, rate, reason = evaluate_f4_f5({"lap1": 12.0, "lap2": 13.0})
     assert rule == "F5"
     assert rate == 40
-    assert "11.0" in reason
+    assert "12.0" in reason
 
 
-def test_evaluate_f4_only_lap1_below_threshold():
-    """lap1 ≤ 11.2 のみ(lap2 > 11.2)→ F4(+30)発火。"""
-    rule, rate, reason = evaluate_f4_f5({"lap1": 11.0, "lap2": 12.0})
+def test_evaluate_f5_lap_2f_total_below_threshold():
+    """lap1+lap2 ≤ 24.8(lap1 単独は閾値 over)→ F5 発火。"""
+    rule, rate, reason = evaluate_f4_f5({"lap1": 12.4, "lap2": 12.3})
+    # lap1=12.4 > 12.3 だが、合計 24.7 ≤ 24.8 なので F5
+    assert rule == "F5"
+    assert rate == 40
+
+
+def test_evaluate_f4_only_when_lap1_between_thresholds():
+    """lap1 ∈ (12.3, 12.5] かつ 1F+2F > 24.8 だが ≤ 25.4 → F4 発火。"""
+    rule, rate, reason = evaluate_f4_f5({"lap1": 12.5, "lap2": 12.9})
+    # lap1=12.5 ≤ 12.5 (F4 OK)、合計 25.4 ≤ 25.4(F4 OK)
+    # lap1=12.5 > 12.3 (F5 NG)、合計 25.4 > 24.8 (F5 NG)
     assert rule == "F4"
     assert rate == 30
-    assert "11.0" in reason
 
 
-def test_evaluate_no_fire_when_lap1_above_threshold():
-    """lap1 > 11.2 → どんな lap2 でも不発(F4 は lap1 で判定)。"""
-    rule, rate, _ = evaluate_f4_f5({"lap1": 12.0, "lap2": 11.0})
+def test_evaluate_no_fire_when_both_above_thresholds():
+    """lap1 > 12.5 かつ lap1+lap2 > 25.4 → 不発。"""
+    rule, rate, _ = evaluate_f4_f5({"lap1": 12.6, "lap2": 13.0})
     assert rule is None
     assert rate == 0
 
 
-def test_evaluate_boundary_11_2_fires_f5():
-    """境界値 11.2 ジャストは ≤ なので F5 発火。"""
-    rule, rate, _ = evaluate_f4_f5({"lap1": 11.2, "lap2": 11.2})
+def test_evaluate_boundary_f5_lap1_at_12_3():
+    """境界値 lap1=12.3 ジャスト → F5 発火(≤ なので含む)。"""
+    rule, rate, _ = evaluate_f4_f5({"lap1": 12.3, "lap2": 13.0})
     assert rule == "F5"
     assert rate == 40
 
 
-def test_evaluate_boundary_lap1_only_at_11_2():
-    """lap1 = 11.2(境界) + lap2 = 11.3(僅かに over)→ F4 発火。"""
-    rule, rate, _ = evaluate_f4_f5({"lap1": 11.2, "lap2": 11.3})
+def test_evaluate_boundary_f5_lap_2f_at_24_8():
+    """境界値 lap1+lap2=24.8 ジャスト(lap1=12.4)→ F5 発火。"""
+    rule, rate, _ = evaluate_f4_f5({"lap1": 12.4, "lap2": 12.4})
+    # lap1+lap2 = 24.8 ≤ 24.8 (F5 OK), lap1 12.4 > 12.3 (F5 NG)
+    assert rule == "F5"
+
+
+def test_evaluate_boundary_f4_lap1_at_12_5():
+    """境界値 lap1=12.5 ジャスト + lap2=13.0 → F4 発火(F5 不発)。"""
+    rule, rate, _ = evaluate_f4_f5({"lap1": 12.5, "lap2": 13.0})
+    assert rule == "F4"
+
+
+def test_evaluate_boundary_f4_lap_2f_at_25_4():
+    """境界値 lap1+lap2=25.4 ジャスト(lap1=12.7) → F4 発火。"""
+    rule, rate, _ = evaluate_f4_f5({"lap1": 12.7, "lap2": 12.7})
+    # lap1=12.7 > 12.5 だが 1F+2F=25.4 ≤ 25.4 で F4 発火
+    assert rule == "F4"
+
+
+def test_evaluate_lap2_missing_lap1_under_f5():
+    """lap2 欠損 + lap1 ≤ 12.3 → F5 発火(lap1 単独条件で OK)。"""
+    rule, rate, _ = evaluate_f4_f5({"lap1": 12.0, "lap2": None})
+    assert rule == "F5"
+    assert rate == 40
+
+
+def test_evaluate_lap2_missing_lap1_in_f4_range():
+    """lap2 欠損 + lap1 ∈ (12.3, 12.5] → F4 発火。"""
+    rule, rate, _ = evaluate_f4_f5({"lap1": 12.5, "lap2": None})
     assert rule == "F4"
     assert rate == 30
 
 
-def test_evaluate_lap2_missing_gives_f4_when_lap1_ok():
-    """lap2 欠損(NaN/None)+ lap1 ≤ 11.2 → F4 のみ(F5 は不発)。"""
-    rule, rate, _ = evaluate_f4_f5({"lap1": 11.0, "lap2": None})
-    assert rule == "F4"
-    assert rate == 30
+def test_evaluate_lap2_missing_lap1_above_f4():
+    """lap2 欠損 + lap1 > 12.5 → 不発(累積判定不能)。"""
+    rule, rate, _ = evaluate_f4_f5({"lap1": 13.0, "lap2": None})
+    assert rule is None
+    assert rate == 0
 
 
 def test_evaluate_none_input_returns_none():
@@ -79,9 +116,19 @@ def test_evaluate_none_input_returns_none():
     assert evaluate_f4_f5({}) == (None, 0, None)
 
 
-def test_evaluate_threshold_constant_is_11_2():
-    """spec の閾値は 11.2 秒固定。"""
-    assert F4_F5_THRESHOLD == 11.2
+def test_evaluate_threshold_constants():
+    """v1.7.5 の閾値定数(実測ベースの上位 12% / 25% 相当)。"""
+    from utils.training_data import (
+        F5_LAP1_THRESHOLD, F5_LAP_2F_TOTAL_THRESHOLD,
+        F4_LAP1_THRESHOLD, F4_LAP_2F_TOTAL_THRESHOLD,
+    )
+    assert F5_LAP1_THRESHOLD == 12.3
+    assert F5_LAP_2F_TOTAL_THRESHOLD == 24.8
+    assert F4_LAP1_THRESHOLD == 12.5
+    assert F4_LAP_2F_TOTAL_THRESHOLD == 25.4
+    # F4 は F5 より緩い境界(穴馬を広く拾う)
+    assert F4_LAP1_THRESHOLD > F5_LAP1_THRESHOLD
+    assert F4_LAP_2F_TOTAL_THRESHOLD > F5_LAP_2F_TOTAL_THRESHOLD
 
 
 # ==================================================================
