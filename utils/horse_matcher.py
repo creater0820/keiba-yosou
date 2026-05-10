@@ -31,7 +31,8 @@ import pandas as pd
 
 
 MIN_VOTES_HIGH = 5       # 5 過去走以上で同一 horse_id にヒット = 高信頼度
-MIN_VOTES_MEDIUM = 3     # 3-4 走一致 = 中信頼度(候補が単独 + 直近 race_date 18ヶ月以内)
+MIN_VOTES_MEDIUM = 2     # 2 票以上 + 単独 + 直近 12ヶ月内 = 中信頼度
+                          # (v1.7.3 で 3 → 2 に緩和。過去走 1-2 走の馬を救済)
 MEDIUM_RECENT_MONTHS = 18  # 中信頼度の偽陽性予防: candidate の最新 race_date がこの期間内
 DATE_TOLERANCE_DAYS = 3  # historical race_date との許容差(日)
 

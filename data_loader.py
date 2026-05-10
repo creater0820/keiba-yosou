@@ -431,10 +431,9 @@ def enrich_dc_with_historical(
             new_horse_names.append(
                 latest_horse_name_by_hid.get(hist_hid) or row["horse_name"]
             )
+            # v1.7.3: 「(当日確認)」プレースホルダを廃止。jockey 不明時は「—」
             valid_jockey = _latest_valid_jockey(hist_hid)
-            if not valid_jockey:
-                valid_jockey = "(当日確認)"
-            new_jockeys.append(valid_jockey)
+            new_jockeys.append(valid_jockey or "—")
             matched_hist_ids.append(hist_hid)
             # past_grouped は既に dict リスト化済み(上で前処理)
             past_records = past_grouped.get(hist_hid, [])
@@ -443,19 +442,22 @@ def enrich_dc_with_historical(
                 runs10.append(None)
             new_past_runs_by_horse[dc_hid] = runs10
         else:
-            # マッチ失敗 → 馬名にラベル付与してお父様に状態を明示
-            if n_dc_runs == 0:
-                label = "(新馬)"
-            elif n_dc_runs <= 2:
-                label = "(過去走少)"
-            else:
-                label = "(DB照合不能)"
+            # v1.7.3: マッチ失敗時のラベルサフィックスを撲滅。
+            # 旧: 「馬番6(過去走少)」「馬番N(DB照合不能)」「馬番N(新馬)」
+            # 新: 「馬番N」のみ(過去走 0 走の真の新馬は識別子として末尾★)
+            # → スクショで報告された「馬番6(過去走少)((当日確認))」のような
+            #   重複プレースホルダ表示を完全に防ぐ。マッチ成功すれば実名、
+            #   失敗すれば馬番だけのシンプル表示で UI を統一。
             try:
                 hno = int(row["horse_number"])
             except (ValueError, TypeError):
                 hno = 0
-            new_horse_names.append(f"馬番{hno}{label}")
-            new_jockeys.append("(当日確認)")
+            if n_dc_runs == 0:
+                # 真の新馬のみ末尾に小さなマーカー(過去走 0 確実、識別用)
+                new_horse_names.append(f"馬番{hno} 🆕")
+            else:
+                new_horse_names.append(f"馬番{hno}")
+            new_jockeys.append("—")  # 「(当日確認)」廃止
             matched_hist_ids.append(None)
             failed_runs = list(dc_past_runs.get(dc_hid, []))
             while len(failed_runs) < 10:
