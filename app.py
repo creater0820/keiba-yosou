@@ -1247,9 +1247,10 @@ with st.sidebar:
                 hit = f5_hit or f4_hit
                 if not hit:
                     continue
-                _jockey = _jockey_by_hid.get(_h.horse_id, "") or "(当日確認)"
+                # v1.7.3: 「(当日確認)」廃止 → 「—」に統一
+                _jockey = _jockey_by_hid.get(_h.horse_id, "") or "—"
                 if not _jockey.strip():
-                    _jockey = "(当日確認)"
+                    _jockey = "—"
                 elite_horses.append({
                     "course": _course,
                     "race_number": int(_meta.get("race_number") or 0),
