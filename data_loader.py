@@ -482,8 +482,24 @@ def enrich_dc_with_historical(
     return df
 
 
+# =====================================================================
+# enrich スキーマバージョン(v1.7.4 で導入)
+# =====================================================================
+# v1.7.3 で「(過去走少)」「(当日確認)」プレースホルダ廃止 + 騎手「—」化を
+# 行ったが、`enrich_dc_with_historical_cached` の cache key には file_hash
+# と today_going しか含まれず、Streamlit Cloud / ローカルともに **既存の
+# キャッシュが古いプレースホルダ入り DataFrame を return し続けて** 修正が
+# 反映されない問題が発生した。
+#
+# このバージョン文字列を cache_key に追加することで、enrich の出力スキーマ
+# を変える時に **自動的に古いキャッシュを無効化** する。以降ラベル表記や
+# 列構成を変える時はこの文字列を bump する運用にする。
+ENRICH_SCHEMA_VERSION = "v3-no-placeholders"
+
+
 @st.cache_data(show_spinner="DC 形式の過去走を historical と照合中…")
 def enrich_dc_with_historical_cached(
+    schema_version: str,
     file_hash: str,
     today_going: str,
     _race_card_df: pd.DataFrame,
@@ -492,14 +508,17 @@ def enrich_dc_with_historical_cached(
     """
     enrich_dc_with_historical のキャッシュ版。
 
-    キャッシュキー = (file_hash, today_going)。
-    file_hash が同じ + 同じ going なら 159k 行スキャン ×N 馬 を再実行しない。
-    DataFrame は _ プレフィックスで Streamlit のハッシュ対象から除外。
-    pandas attrs はキャッシュ pickle で保持されるので戻り値のみで OK。
+    キャッシュキー = (schema_version, file_hash, today_going)。
+    schema_version が変わると古いキャッシュが自動的に無効化されるため、
+    プレースホルダ廃止や列追加などスキーマ変更時に確実に新コードが走る。
 
-    本関数は app.py の毎 rerun から呼ばれるが、2 回目以降のサイドバー操作
-    では cache hit で即座に返るため UI レスポンスが大幅に改善する。
+    file_hash が同じ + 同じ going + 同じ schema_version なら 159k 行
+    スキャン ×N 馬 を再実行しない。DataFrame は _ プレフィックスで
+    Streamlit のハッシュ対象から除外。pandas attrs はキャッシュ pickle で
+    保持されるので戻り値のみで OK。
     """
+    # schema_version は cache key として使うのみ、実際の処理では参照しない
+    del schema_version
     return enrich_dc_with_historical(
         _race_card_df, _historical_df, today_going=today_going,
     )

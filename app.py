@@ -1071,25 +1071,34 @@ if (race_card_df is not None
         and historical is not None
         and race_card_df.attrs.get("data_format") == "dc"
         and file_hash is not None):
-    from data_loader import enrich_dc_with_historical_cached
+    from data_loader import enrich_dc_with_historical_cached, ENRICH_SCHEMA_VERSION
     today_going = st.session_state.get("dc_going", "良")
     # **perf 対策**: @st.cache_data だけでは Streamlit の cache key 変動で
     # まれに miss して enrich が 12 秒走ることがある(競馬場ラジオ切替で
     # 体感 20 秒の主要因)。session_state による「同セッション内 ID-比較」
     # の二段防御を足し、ラジオ切替の単純 rerun では enrich を絶対に
     # 走らせない。session_state の値はメモリ参照のみで O(1)。
-    _enriched_session_key = f"_enriched_dc_{file_hash}_{today_going}"
+    # **v1.7.4**: cache key に ENRICH_SCHEMA_VERSION を含めて、enrich の
+    # 出力スキーマを変えた時に古いキャッシュを自動無効化する。これで
+    # v1.7.3 のプレースホルダ廃止が確実に反映される。
+    _enriched_session_key = (
+        f"_enriched_dc_{ENRICH_SCHEMA_VERSION}_{file_hash}_{today_going}"
+    )
     _cached_enriched = st.session_state.get(_enriched_session_key)
     if _cached_enriched is not None:
         race_card_df = _cached_enriched
     else:
         race_card_df = enrich_dc_with_historical_cached(
-            file_hash, today_going, race_card_df, historical.races,
+            ENRICH_SCHEMA_VERSION, file_hash, today_going,
+            race_card_df, historical.races,
         )
         st.session_state[_enriched_session_key] = race_card_df
-        # 古い going 用エントリは消す(メモリ抑制)
+        # 古い going 用エントリ + 旧スキーマ版エントリを掃除(メモリ抑制
+        # + スキーマ移行時の cache pollution 防止)
         for _k in list(st.session_state.keys()):
-            if (_k.startswith(f"_enriched_dc_{file_hash}_")
+            if not isinstance(_k, str):
+                continue
+            if (_k.startswith("_enriched_dc_")
                     and _k != _enriched_session_key):
                 st.session_state.pop(_k, None)
 
