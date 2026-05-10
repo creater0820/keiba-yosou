@@ -345,6 +345,13 @@ def compute_horse_rating(
             ))
             credited_rule_ids.add(h_rule)
 
+    # ----- C穴 / D穴 / E穴(v1.8.0 で導入したが第 1 案バックテストで悪化、撤回) -----
+    # 第 1 案では C穴=15 / D穴=5 / E穴=10 を加点していたが、◎本命数が
+    # 69 → 86 に増え穴馬が容易に rating ≥ 100 になりすぎ、複勝率が
+    # 24.64% → 20.93% に悪化したため第 2 案で発火を停止する。
+    # 評価試行ログ(missed_rule_ids)には残して UI で「v1.8.0 で撤回」を
+    # 明示できるようにする。坂路の F4穴/F5穴 は維持(穴馬発見の主軸)。
+
     # ----- 合計 rating(contributes_to_rating=True のもののみ) -----
     total = 0
     for hit in matched:

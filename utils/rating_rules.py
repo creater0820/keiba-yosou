@@ -80,7 +80,7 @@ RATING_RULES_C: list[RatingRule] = [
     RatingRule(
         rule_id=f"C{i+1}",
         category="C",
-        rate=50,
+        rate=50,  # v1.8.0 第 2 案: 50 維持(第 1 案で 45 にしたら人気馬が浮上せず悪化)
         title=_C_LABELS[i],
         description=_C_LABELS[i],
         contributes_to_rating=True,
@@ -131,7 +131,7 @@ RATING_RULES_E: list[RatingRule] = [
     RatingRule(
         rule_id=f"E{i+1}",
         category="E",
-        rate=20,
+        rate=25,  # v1.8.0: 20 → 25(通過順位改善なしでも上3F速い ≒ 隠れ好走で増点)
         title=_E_LABELS[i],
         description=_E_LABELS[i],
         contributes_to_rating=True,
@@ -216,7 +216,7 @@ RATING_RULES_F: list[RatingRule] = [
     RatingRule(
         rule_id="F1",
         category="F",
-        rate=30,
+        rate=30,  # v1.8.0 第 2 案: 30 維持(第 1 案で 35 にしても効果なく悪化要因)
         title="ダート不良馬場 + 逃げ脚質 → +30",
         description=(
             "今回レースが ダ + 不良 で、馬の脚質が逃げの場合に加点。"
@@ -239,8 +239,8 @@ RATING_RULES_F: list[RatingRule] = [
     RatingRule(
         rule_id="F3",
         category="F",
-        rate=20,
-        title="1600m以上 + 斤量 -3kg(前走比)→ +20",
+        rate=25,  # v1.8.0: 20 → 25(斤量減は強いシグナル、人気に織込みされにくい)
+        title="1600m以上 + 斤量 -3kg(前走比)→ +25",
         description=(
             "今回レース距離が 1600m 以上で、前走と比べて斤量が 3kg 以上軽い"
             "(carry_weight 差 ≤ -3.0)場合に加点。負担軽減で末脚伸びる期待値。"
@@ -279,13 +279,11 @@ RATING_RULES_F: list[RatingRule] = [
     RatingRule(
         rule_id="F4穴",
         category="F",
-        rate=15,
+        rate=15,  # v1.8.0 第 2 案: 15 維持(第 1 案 20 で穴馬過剰浮上 → 戻す)
         title="F4 該当 + 人気 ≥ 6番人気 → 穴馬上積み +15",
         description=(
-            "**v1.7.5.1 で実装**。F4(坂路好調)該当馬のうち、6番人気以下の"
-            "「市場に織り込まれていない穴馬候補」に追加で +15 加点する。"
-            "F4(+30)と合算で +45 となり、軸候補としてさらに浮上。"
-            "F5穴 と排他(F5 該当馬は F5穴 が優先で F4穴 は適用されない)。"
+            "**v1.7.5.1 で実装**。F4 該当 + 6 番人気以下の馬に追加 +15。"
+            "F4(+30)と合算で +45 となり軸候補級。F5穴 と排他。"
         ),
         contributes_to_rating=True,
         enabled=True,
@@ -293,16 +291,20 @@ RATING_RULES_F: list[RatingRule] = [
     RatingRule(
         rule_id="F5穴",
         category="F",
-        rate=20,
+        rate=20,  # v1.8.0 第 2 案: 20 維持(第 1 案 30 で穴馬過剰浮上 → 戻す)
         title="F5 該当 + 人気 ≥ 6番人気 → 穴馬上積み +20",
         description=(
-            "**v1.7.5.1 で実装**。F5(坂路抜群)該当馬のうち、6番人気以下の"
-            "穴馬候補に追加で +20 加点する。F5(+40)と合算で +60 となり、"
-            "本命級の評価。"
+            "**v1.7.5.1 で実装**。F5 該当 + 6 番人気以下の馬に追加 +20。"
+            "F5(+40)と合算で +60 となり本命級評価。"
         ),
         contributes_to_rating=True,
         enabled=True,
     ),
+    # v1.8.0 で導入を検討した C穴 / D穴 / E穴 は、第 1 案バックテスト
+    # (2026-04-01〜2026-05-03、69→86 レース ◎ 増)で複勝率 24.64% → 20.93%、
+    # 単勝参考回収率 545% → 438% と全指標悪化したため第 2 案で撤回。
+    # 穴馬狙いは F4穴/F5穴(坂路調教ベース)に集約する設計が最適と確定。
+    # 将来再検討する時はバックテスト前提で配点を実測決定する。
 ]
 
 
@@ -327,33 +329,33 @@ RATING_RULES_A: list[RatingRule] = [
     RatingRule(
         rule_id="A2",
         category="wide",
-        rate=4,
+        rate=6,  # v1.8.0: 4 → 6
         title="1番人気の隣枠 + 7番人気以降 → ワイド候補",
-        description="該当馬を ワイド候補に。rate 4 はソート用 priority weight。",
+        description="該当馬を ワイド候補に。priority weight(rating 加算なし)。",
         contributes_to_rating=False,
     ),
     RatingRule(
         rule_id="A3",
         category="wide",
-        rate=5,
+        rate=8,  # v1.8.0: 5 → 8
         title="前走着順が 5/7/9/11/13着 → ワイド候補",
-        description="該当馬を ワイド候補に(priority weight 5)。",
+        description="該当馬を ワイド候補に(priority weight 8)。",
         contributes_to_rating=False,
     ),
     RatingRule(
         rule_id="A4",
         category="wide",
-        rate=7,
+        rate=12,  # v1.8.0: 7 → 12
         title="1枠の逃げ馬 + 5番人気以降 → ワイド候補",
-        description="該当馬を ワイド候補に(priority weight 7)。",
+        description="該当馬を ワイド候補に(priority weight 12)。",
         contributes_to_rating=False,
     ),
     RatingRule(
         rule_id="A5",
         category="wide",
-        rate=30,
+        rate=35,  # v1.8.0: 30 → 35
         title="競馬場が小倉 or 中京 + 逃げ脚質 → ワイド候補",
-        description="該当馬を ワイド候補に(priority weight 30、最高優先)。",
+        description="該当馬を ワイド候補に(priority weight 35、最高優先)。",
         contributes_to_rating=False,
     ),
 ]
