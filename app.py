@@ -506,8 +506,8 @@ def _build_all_marks_html(
                             body.append(
                                 f'<div class="am-caption">'
                                 f"{_esc(', '.join(f_missed))} — 坂路 CSV と馬名"
-                                "マッチしなかった、または Lap1/Lap2 が "
-                                "11.2 秒を超えていた(発火条件未充足)。</div>"
+                                "マッチしなかった、または Lap1/Lap1+2F が "
+                                "F4/F5 閾値を超えていた(発火条件未充足)。</div>"
                             )
                         else:
                             body.append(
@@ -1227,20 +1227,34 @@ with st.sidebar:
             st.caption("該当馬なし(rating 100 以上の馬がいません)")
 
         # ================================================================
-        # 🔥 坂路で超エリート級の上がり ─ F4/F5 発火馬のハイライト
+        # 🔥 坂路調教 好仕上がり馬(v1.7.5.2 で再設計)
         # ================================================================
-        # F4(1F ≤ 11.2、+30)/ F5(1F+2F ≤ 11.2、+40)は超エリート級発火条件で
-        # 1 日 0〜数頭しか出ない希少イベント。発火時は「激走・大穴の前兆」
-        # として、お父様が瞬時に把握できるよう専用セクションで強調する。
-        # F4 と F5 が同じ馬で同時発火することはない(F5 排他で +40 のみ採用)。
+        # v1.7.5 で F4/F5 閾値を実測ベースに緩和(F5 lap1≤12.3 / F4 lap1≤12.5
+        # 等)、v1.7.5.1 で穴馬専用 F4穴/F5穴(人気 ≥ 6 番 + F4/F5 該当)を
+        # 新設したことで該当馬数が大幅増加(F5 47 / F4 48 / F5穴 24 / F4穴 29)。
+        # サイドバーは「穴馬最有力 → 穴馬候補 → 絶好調 → 好調」の優先度で
+        # 4 バケット表示し、F5/F4 (人気馬含む)は数が多いので expander で
+        # デフォルト折りたたむ(穴馬発見が本機能のメイン目的)。
         st.divider()
-        st.subheader("🔥 坂路で超エリート級の上がり")
+        st.subheader("🔥 坂路調教 好仕上がり馬")
         st.caption(
-            "坂路調教で 1F または 1F+2F が 11.2 秒以下の超エリート級。"
-            "激走・大穴の前兆。"
+            "坂路調教の上がりタイムが業界上位水準の馬を抽出。\n"
+            "・F5(抜群): 1F ≤ 12.3 または 1F+2F ≤ 24.8\n"
+            "・F4(好調): 1F ≤ 12.5 または 1F+2F ≤ 25.4\n"
+            "・穴印: F4/F5 該当 + 人気 ≥ 6 番人気 を穴馬候補として優先表示"
         )
 
-        elite_horses: list[dict] = []
+        # ----- 4 バケット振り分け(F4/F5 と F4穴/F5穴 は排他) -----
+        # 排他規則:
+        #   - F5穴 該当馬は F5 / F4 / F4穴 にカウントしない(穴の方を優先表示)
+        #   - F5 該当馬は F4 にカウントしない(F5 排他、v1.7.5 仕様準拠)
+        #   - F4穴 該当馬は F4 にカウントしない(穴を優先)
+        # 結果: 各馬は最大 1 つの bucket にだけ入る
+        bucket_f5_hole: list[dict] = []
+        bucket_f4_hole: list[dict] = []
+        bucket_f5: list[dict] = []
+        bucket_f4: list[dict] = []
+
         for _rid, _pred in _session_preds.items():
             ratings = getattr(_pred, "horse_ratings", None) or []
             if not ratings:
@@ -1250,64 +1264,111 @@ with st.sidebar:
             if selected_course != "全場" and _course != selected_course:
                 continue
             for _h in ratings:
-                # F5 が発火していれば F5 採用、無ければ F4(F4/F5 排他)
+                # 各馬の発火ルール ID 集合
+                rule_ids = {m.rule_id for m in _h.matched}
+                if not (rule_ids & {"F4", "F5", "F4穴", "F5穴"}):
+                    continue
+
+                # ラップタイム理由(F5 / F4 のヒットから抽出)
                 f5_hit = next((m for m in _h.matched if m.rule_id == "F5"), None)
                 f4_hit = next((m for m in _h.matched if m.rule_id == "F4"), None)
-                hit = f5_hit or f4_hit
-                if not hit:
-                    continue
-                # v1.7.3: 「(当日確認)」廃止 → 「—」に統一
+                base_hit = f5_hit or f4_hit
+                if base_hit is None:
+                    continue  # 念のため
+
                 _jockey = _jockey_by_hid.get(_h.horse_id, "") or "—"
                 if not _jockey.strip():
                     _jockey = "—"
-                elite_horses.append({
+                _pop_str = (
+                    f"{_h.popularity}番人気" if _h.popularity > 0 else "人気不明"
+                )
+                entry = {
                     "course": _course,
                     "race_number": int(_meta.get("race_number") or 0),
                     "post_time": _meta.get("post_time", ""),
                     "horse_number": _h.horse_number,
                     "horse_name": _h.horse_name,
                     "jockey": _jockey,
-                    "rule_id": hit.rule_id,
-                    "reason": hit.reason or "",
-                })
+                    "popularity": _h.popularity,
+                    "popularity_str": _pop_str,
+                    "rate": _h.total_rating,
+                    "lap_reason": base_hit.reason or "",
+                }
 
-        # 並び順: post_time 昇順 → 場 → R 番昇順(レース順に並ぶ)
-        elite_horses.sort(key=lambda x: (
-            x["post_time"] or "99:99", x["course"], x["race_number"],
-        ))
+                # 排他振り分け(穴系優先)
+                if "F5穴" in rule_ids:
+                    bucket_f5_hole.append(entry)
+                elif "F4穴" in rule_ids:
+                    bucket_f4_hole.append(entry)
+                elif "F5" in rule_ids:
+                    bucket_f5.append(entry)
+                elif "F4" in rule_ids:
+                    bucket_f4.append(entry)
 
-        # 坂路 CSV のアップロード状況で表示分岐
-        _training_uploaded = st.session_state.get("uploaded_training_bytes") is not None
+        # 並び順: 穴系は人気が大きい(下位人気)順、本命系は rating 降順
+        bucket_f5_hole.sort(key=lambda x: (-x["popularity"], -x["rate"]))
+        bucket_f4_hole.sort(key=lambda x: (-x["popularity"], -x["rate"]))
+        bucket_f5.sort(key=lambda x: -x["rate"])
+        bucket_f4.sort(key=lambda x: -x["rate"])
+
+        # ----- 描画ヘルパ(コンパクトな 1 行表示) -----
+        def _format_elite_line(e: dict) -> str:
+            return (
+                f"・{e['course']}{e['race_number']}R "
+                f"{e['horse_number']} **{e['horse_name']}**"
+                f"({e['popularity_str']} / {e['lap_reason']})"
+            )
+
+        # ----- 表示分岐 -----
+        _training_uploaded = (
+            st.session_state.get("uploaded_training_bytes") is not None
+        )
+        total_hits = (
+            len(bucket_f5_hole) + len(bucket_f4_hole)
+            + len(bucket_f5) + len(bucket_f4)
+        )
 
         if not _training_uploaded:
-            st.caption(
-                "坂路調教 CSV 未アップロードのため評価不可。"
+            st.info(
+                "坂路調教 CSV が未アップロードのため評価不可。"
                 "メイン画面の「② 坂路調教 CSV」からアップロードしてください。"
             )
-        elif not elite_horses:
-            st.caption("該当馬なし(本日 F4/F5 発火 0 頭)")
+        elif total_hits == 0:
+            st.caption("該当馬なし(本日は F4/F5 該当馬がありません)")
         else:
-            def _render_elite(h: dict) -> None:
-                emoji = "💥" if h["rule_id"] == "F5" else "🔥"
-                line1 = (
-                    f"**{emoji} {h['course']}{h['race_number']}R** "
-                    f"{h['horse_number']} {h['horse_name']}({h['jockey']})"
+            # 【穴馬最有力】F5穴(デフォルト展開、これが本機能のメイン)
+            if bucket_f5_hole:
+                st.markdown(
+                    f"**💥 【穴馬最有力】F5穴({len(bucket_f5_hole)}頭)**"
                 )
-                line2 = f"&nbsp;&nbsp;{h['rule_id']}: {h['reason']}"
-                st.markdown(line1)
-                st.caption(line2)
+                for e in bucket_f5_hole:
+                    st.markdown(_format_elite_line(e))
 
-            # 4 頭以上は折りたたみ(縦の専有を抑える)、3 頭以下は直に展開
-            if len(elite_horses) >= 4:
+            # 【穴馬候補】F4穴(デフォルト展開)
+            if bucket_f4_hole:
+                st.markdown(
+                    f"**🔥 【穴馬候補】F4穴({len(bucket_f4_hole)}頭)**"
+                )
+                for e in bucket_f4_hole:
+                    st.markdown(_format_elite_line(e))
+
+            # 【絶好調】F5(人気馬含む、expander 折りたたみ)
+            if bucket_f5:
                 with st.expander(
-                    f"🔥 坂路エリート {len(elite_horses)} 頭",
+                    f"🐎 【絶好調】F5({len(bucket_f5)}頭)",
                     expanded=False,
                 ):
-                    for _h in elite_horses:
-                        _render_elite(_h)
-            else:
-                for _h in elite_horses:
-                    _render_elite(_h)
+                    for e in bucket_f5:
+                        st.markdown(_format_elite_line(e))
+
+            # 【好調】F4(数が多いので expander 折りたたみ)
+            if bucket_f4:
+                with st.expander(
+                    f"🐎 【好調】F4({len(bucket_f4)}頭)",
+                    expanded=False,
+                ):
+                    for e in bucket_f4:
+                        st.markdown(_format_elite_line(e))
 
     st.divider()
     st.subheader("📊 過去データ")
