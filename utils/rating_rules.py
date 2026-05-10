@@ -276,6 +276,33 @@ RATING_RULES_F: list[RatingRule] = [
         contributes_to_rating=True,
         enabled=True,
     ),
+    RatingRule(
+        rule_id="F4穴",
+        category="F",
+        rate=15,
+        title="F4 該当 + 人気 ≥ 6番人気 → 穴馬上積み +15",
+        description=(
+            "**v1.7.5.1 で実装**。F4(坂路好調)該当馬のうち、6番人気以下の"
+            "「市場に織り込まれていない穴馬候補」に追加で +15 加点する。"
+            "F4(+30)と合算で +45 となり、軸候補としてさらに浮上。"
+            "F5穴 と排他(F5 該当馬は F5穴 が優先で F4穴 は適用されない)。"
+        ),
+        contributes_to_rating=True,
+        enabled=True,
+    ),
+    RatingRule(
+        rule_id="F5穴",
+        category="F",
+        rate=20,
+        title="F5 該当 + 人気 ≥ 6番人気 → 穴馬上積み +20",
+        description=(
+            "**v1.7.5.1 で実装**。F5(坂路抜群)該当馬のうち、6番人気以下の"
+            "穴馬候補に追加で +20 加点する。F5(+40)と合算で +60 となり、"
+            "本命級の評価。"
+        ),
+        contributes_to_rating=True,
+        enabled=True,
+    ),
 ]
 
 

@@ -322,3 +322,49 @@ def evaluate_f4_f5(
         return "F4", 30, reason
 
     return None, 0, None
+
+
+# =====================================================================
+# F4穴 / F5穴: 穴馬向け追加加点(v1.7.5.1 で導入)
+# =====================================================================
+# F4 / F5 の坂路調教好調に加えて、人気 ≥ 6 番の馬は「市場に織り込まれて
+# いない調教好調馬」= 穴馬候補として追加加点する。
+F_HOLE_MIN_POPULARITY = 6  # 6 番人気以下で「穴」扱い
+
+F5_HOLE_BONUS = 20  # F5 (+40) に追加で +20 → 合計 +60
+F4_HOLE_BONUS = 15  # F4 (+30) に追加で +15 → 合計 +45
+
+
+def evaluate_f4_f5_hole(
+    base_rule: str | None,
+    popularity: int | None,
+) -> tuple[str | None, int, str | None]:
+    """F4 / F5 が発火した馬で、人気 ≥ 6 番なら穴馬ボーナスを返す。
+
+    引数:
+        base_rule: evaluate_f4_f5 の戻り値の rule_id("F4" / "F5" / None)
+        popularity: 馬の人気(1=1番人気、None や 0 は不明扱い)
+
+    戻り値:
+        (穴ルール ID, 追加加点, 理由文字列)。発火しないなら (None, 0, None)。
+        F5 → F5穴(+20)、F4 → F4穴(+15)、人気不明や上位人気では発火なし。
+    """
+    if base_rule not in ("F4", "F5"):
+        return None, 0, None
+    if popularity is None or popularity <= 0:
+        return None, 0, None
+    if popularity < F_HOLE_MIN_POPULARITY:
+        return None, 0, None
+
+    if base_rule == "F5":
+        reason = (
+            f"F5 該当 + {popularity}番人気(≥{F_HOLE_MIN_POPULARITY})の穴馬"
+            "として +20 上積み"
+        )
+        return "F5穴", F5_HOLE_BONUS, reason
+    # F4
+    reason = (
+        f"F4 該当 + {popularity}番人気(≥{F_HOLE_MIN_POPULARITY})の穴馬"
+        "として +15 上積み"
+    )
+    return "F4穴", F4_HOLE_BONUS, reason
