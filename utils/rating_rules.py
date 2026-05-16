@@ -393,6 +393,31 @@ RATING_RULES_B: list[RatingRule] = [
 
 
 # =====================================================================
+# G: コース特性バイアス補正(v1.9.0 Phase 1)
+# =====================================================================
+# course_bias_rules.py が SSoT。ここでは RatingRule に変換してロジック
+# 説明ページに表示できるよう ALL_RATING_RULES に組み込む。
+def _make_g_rating_rules() -> list[RatingRule]:
+    """utils/course_bias_rules.py の G ルールから RatingRule リストを生成。"""
+    from utils.course_bias_rules import ALL_G_RULES
+    return [
+        RatingRule(
+            rule_id=g.rule_id,
+            category=g.category,  # "G-Frame" or "G-Style"
+            rate=g.rate,
+            title=g.description,
+            description=g.description,
+            contributes_to_rating=True,
+            enabled=True,
+        )
+        for g in ALL_G_RULES
+    ]
+
+
+RATING_RULES_G: list[RatingRule] = _make_g_rating_rules()
+
+
+# =====================================================================
 # 集約: 全ルールフラットリスト
 # =====================================================================
 
@@ -403,6 +428,7 @@ ALL_RATING_RULES: list[RatingRule] = (
     + RATING_RULES_D
     + RATING_RULES_E
     + RATING_RULES_F
+    + RATING_RULES_G
 )
 
 

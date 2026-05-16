@@ -352,6 +352,38 @@ def compute_horse_rating(
     # 評価試行ログ(missed_rule_ids)には残して UI で「v1.8.0 で撤回」を
     # 明示できるようにする。坂路の F4穴/F5穴 は維持(穴馬発見の主軸)。
 
+    # ----- G カテゴリ: コース特性バイアス補正(v1.9.0 Phase 1、11 ルール) -----
+    # コース × 枠順 × 脚質 のバイアス(東京ダ1400 外枠優位、新潟芝1000 直線
+    # 外枠 36.1%、函館芝1200 逃げ 51.1% 等)を rating に反映。
+    # G-Frame と G-Style から最大 1 つずつマッチ(1 馬最大 +20 程度)。
+    # 配点は +5〜+12 の保守的範囲、減点なし(v1.8.0 の C穴 失敗を踏まえる)。
+    from utils.course_bias_rules import evaluate_course_bias  # 遅延 import
+
+    course = str(race_meta.get("racecourse") or "")
+    surface = str(race_meta.get("surface") or "")
+    try:
+        distance = int(race_meta.get("distance") or 0)
+    except (TypeError, ValueError):
+        distance = 0
+    style = str(running_style or "")
+    # frame は引数 frame_number、style は引数 running_style から既に取得済
+    if course and surface and distance > 0 and frame_number > 0:
+        g_matches = evaluate_course_bias(
+            course=course, surface=surface, distance=distance,
+            frame=frame_number, style=style,
+        )
+        for g_rule in g_matches:
+            if g_rule.rule_id in credited_rule_ids:
+                continue
+            matched.append(RatingHit(
+                rule_id=g_rule.rule_id,
+                rate=g_rule.rate,
+                reason=g_rule.description,
+                run_idx=-1,
+            ))
+            credited_rule_ids.add(g_rule.rule_id)
+            evaluated_rule_ids.add(g_rule.rule_id)
+
     # ----- 合計 rating(contributes_to_rating=True のもののみ) -----
     total = 0
     for hit in matched:
