@@ -494,7 +494,7 @@ def enrich_dc_with_historical(
 # このバージョン文字列を cache_key に追加することで、enrich の出力スキーマ
 # を変える時に **自動的に古いキャッシュを無効化** する。以降ラベル表記や
 # 列構成を変える時はこの文字列を bump する運用にする。
-ENRICH_SCHEMA_VERSION = "v3-no-placeholders"
+ENRICH_SCHEMA_VERSION = "v4-style-multi-tier"
 
 
 @st.cache_data(show_spinner="DC 形式の過去走を historical と照合中…")

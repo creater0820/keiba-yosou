@@ -479,6 +479,8 @@ keiba-yosou/
 - **v1.4**(2026-05): ルール評価対象を直近 5 走 → **直近 10 走** に拡張
   (ベテラン馬の長期実績を拾う)。脚質判定は引き続き直近 5 走の corner_1 平均、
   戦歴マトリクス UI も 5 走表示のまま。
+  ※ v1.9.1 で脚質判定は **多段フォールバック化**(corner_1 不足時 corner_3/4
+     へ降下、過去走 0 馬は距離別 default)。直近 5 走の head5 は維持。
 - **v1.5**(2026-05): 坂路調教 CSV(任意)を二段アップローダで受け付け、
   `utils/training_data.py` でパース → 馬名マッチ → **F4(+30) / F5(+40)** を
   実発火させる。坂路 CSV 未アップロード時は missed_rule_ids にだけ入れて
@@ -907,3 +909,149 @@ keiba-yosou/
     - 開催週ごとの動的バイアス(Phase 3)
   * v1.4 ロジック骨格 完全不変、v1.5.x 性能改善維持、v1.7.0 純正暗転維持、
     v1.8.0 配点維持、session_state 既存キー破壊なし、F4/F5/F4穴/F5穴 維持。
+- **v1.9.1 logic**(現行、2026-05): **脚質判定カバレッジ 100% 化**
+  (多段フォールバック導入)。お父様の DC アップロードで脚質不明馬を撲滅し、
+  G-Style ルール(G7〜G10/G12)の発火不能を解消。
+
+  * **動機**: v1.9.0 で G-Style 5 ルールを追加したが、当日 DC で実機計測
+    したところ **脚質判定不能率 66.26%(328/495)** という想定外の高さで、
+    せっかくの脚質補正が大半の馬で発火できていなかった。
+
+  * **実機調査(scripts/diagnose_style_failures.py、DC260509)で判明した原因**:
+    - **失敗E(主因、174 頭)**: マッチ成功 + 過去走 10 走あるが **corner_1
+      欠損で 3 件未満**。JRA は短距離戦(1600m 以下)で 1 コーナー通過順位を
+      記録しない仕様。historical/races.parquet 全体で corner_1 欠損率
+      **55.98%**、corner_3 / corner_4 はほぼ全走で記録(欠損 1.30% /
+      0.65%)。
+    - 失敗B(110 頭): DC マッチ失敗で historical 引当不可
+    - 失敗A(17 頭): 真の新馬で過去走 0
+    - 失敗D(4 頭): マッチ成功だが過去走 2 走未満
+  * **タスク設計時の Tier 3(父系統テーブル)断念**: 本番
+    `data/historical/races.parquet` に **sire 列が存在しない**(sample に
+    だけある)、`horses.parquet` / `pedigree.parquet` も本番未配置。
+    Phase 2(将来 horses 系を本番投入時)に延期。
+
+  * **採用した 5 段フォールバック設計**(`utils/race_history.py`):
+
+    | Tier | 判定基準 | confidence | 想定対象 |
+    |---|---|---|---|
+    | **1a** | corner_1 ≥ 3 走 | `high` | 中距離主体馬(v1.9.0 までの既存挙動) |
+    | **1b** | corner_1 < 3 + corner_3 ≥ 3 走 | `high` | 短距離馬(JRA 仕様で c1 なし) |
+    | **1c** | c1/c3 < 3 + corner_4 ≥ 3 走 | `medium` | ゴール前順位収束のため一段下げ |
+    | **2**  | 1-2 走の少サンプル | `medium` | 3 歳若手・休み明け |
+    | **4**  | 過去走 0 + distance あり | `default` | 新馬 → 短距離=先行 / 中長=差し |
+    | **5**  | distance も不明 | `default` | 絶対 default=差し(中庸で誤判定時の影響最小) |
+
+    Tier 3(父系統)欠番。
+
+  * **配点・分類閾値**: corner_1/3/4 すべて同一閾値(≤3=逃げ、≤6=先行、
+    ≤10=差し、>10=追込)からスタート。バックテストで効果を見て調整余地。
+
+  * **「不明(先行扱い)」を返さない設計**: v1.9.0 までは過去走不足や
+    corner_1 欠損で "不明(先行扱い)" を返し、G-Style 5 ルール(matcher が
+    `style in ("逃げ", "先行")` 等で文字列比較)が一切発火しなかった。
+    v1.9.1 では Tier 4-5 まで降りても必ず 4 区分(逃げ/先行/差し/追込)の
+    どれかを返す → G-Style 発火率向上。
+
+  * **後方互換**: 既存 API `determine_running_style(past_runs) -> str` は
+    薄い wrapper として残し、Tier 1a 該当ケースで完全に v1.9.0 と同一の
+    脚質を返す。既存 152 テストすべて未修正で pass。distance を活かしたい
+    新コードは `determine_running_style_with_confidence(past_runs, distance)
+    -> (style, confidence)` を直接呼ぶ。
+
+  * **呼び出し側更新**(`prediction_logic.py`):
+    - `_build_horse_mark_data`(v1.0 onmark / v1.1 rating 共通): race_card
+      先頭行から distance を読み新関数を呼ぶ。confidence は HorseMarkData が
+      持たないので破棄(rating 経由は HorseRating に格納)。
+    - `predict_race_dc` フルモード(マッチ成功): 新関数で (style, conf) 取得、
+      HorseRating.running_style_confidence に保存。
+    - `predict_race_dc` 簡易モード(マッチ失敗): "不明(先行扱い)" 直接代入を
+      撤回し、`determine_running_style_with_confidence([], distance=...)` を
+      呼んで Tier 4 default を取得。
+
+  * **HorseRating 拡張**: `running_style_confidence: str = "high"` フィールド
+    追加(default 値で後方互換維持)。RA+SE 経路は default="high" のまま、
+    DC 経路で正確な値が伝達される。
+
+  * **実機効果(DC260509、495 馬)**:
+
+    | 指標 | v1.9.0 | v1.9.1 | 差分 |
+    |---|---|---|---|
+    | 判定不能率 | **66.26%** (328/495) | **0.00%** (0/495) | **-66.26 pt** ✅ |
+    | 逃げ判定 | 25 (5.1%) | 53 (10.7%) | +28 |
+    | 先行判定 | 42 (8.5%) | 161 (32.5%) | +119 |
+    | 差し判定 | 64 (12.9%) | 209 (42.2%) | +145 |
+    | 追込判定 | 36 (7.3%) | 72 (14.5%) | +36 |
+    | G-Style 発火 (G9 京都ダ1800 逃げ/先行) | 0 件 | **8 件** | +8 ✅ |
+
+  * **Tier 別救済頭数内訳(v1.9.1、495 馬)**:
+    - Tier 1a (corner_1): 167 頭 (33.7%) — v1.9.0 でも判定可
+    - **Tier 1b (corner_3): 213 頭 (43.0%) — v1.9.1 で新規救済(最大の貢献)**
+    - Tier 1c (corner_4): 1 頭 (0.2%)
+    - Tier 2 (1-2 走 暫定): 4 頭 (0.8%)
+    - Tier 4 (距離別 default): 110 頭 (22.2%) — 主に DC マッチ失敗・新馬
+    - Tier 5 (絶対 default): 0 頭(distance はほぼ取れるため)
+    - confidence 内訳: high 380 (76.8%) / medium 5 (1.0%) / default 110 (22.2%)
+
+  * **バックテスト(2026-04-01〜2026-05-03、336 レース、RA+SE 経路)**:
+
+    | 指標 | v1.9.0 baseline | v1.9.1 | 差分 |
+    |---|---|---|---|
+    | ◎本命確定数 | 84 | **84** | ±0(完全一致) |
+    | 1 着率 | 14.29% | **14.29%** | ±0.00 pt |
+    | 連対率 | 26.19% | **26.19%** | ±0.00 pt |
+    | 複勝率 | 29.76% | **29.76%** | ±0.00 pt |
+    | 単勝参考回収率 | 695.36% | **695.36%** | ±0.00 pt |
+    | 1-2 番人気 複勝率 | 56.00% | **56.00%** | ±0.00 pt |
+    | ワイド命中率 | 28.57% | **28.57%** | ±0.00 pt |
+
+    **完全一致の理由**: historical の各馬は過去走 10 走に距離混在の中距離
+    戦を含み、ほぼ全馬で corner_1 ≥ 3 走が取れる。Tier 1a を通過するため
+    v1.9.0 と挙動が変わらない。**Tier 1b/1c/2/4/5 は DC 当日アップロード
+    でのみ発動する** = historical バックテストでは regression が起きえない
+    ことが実機で実証された。
+
+  * **判定基準クリア**:
+    - ✅ 脚質判定不能率 0% 達成(66.26% → 0%)
+    - ✅ 複勝率 ±0.5 pt 以内(差 = 0.00 pt、完全一致)
+    - ✅ 既存 152 テスト pass + 新規 21 テスト追加 = 全 173 pass
+    - ✅ Tier 1a の挙動完全不変(バックテスト完全一致 + 後方互換 wrapper)
+
+  * **新規テスト 21 件**(`tests/test_race_history.py`):
+    - Tier 1a 境界値 4 件(逃げ・先行・差し・追込の各境界)
+    - Tier 1b 短距離馬 corner_3 救済 2 件
+    - Tier 1c corner_4 only medium 1 件
+    - Tier 2 少サンプル 2 件
+    - Tier 4 距離別 default 4 件(短距離境界 1400m 含む)
+    - Tier 5 絶対 default 2 件
+    - 後方互換 wrapper 3 件(str 戻り値、"不明" を返さない確認、
+      v1.9.0 完全一致 4 ケース)
+    - 健全性 3 件(NaN/None skip、CONFIDENCE_LEVELS 公開)
+
+  * **キャッシュ無効化**:
+    - `utils/race_history.STYLE_SCHEMA_VERSION = "v1.9.1-multi-tier"` 新設
+    - `app.py` の `cache_hash` に組み込み(file_hash + STYLE_SCHEMA_VERSION
+      + dc_going)。Streamlit Cloud デプロイ後に旧バージョンの予想結果が
+      cache hit で返る事故を防止。
+    - `data_loader.ENRICH_SCHEMA_VERSION = "v3-no-placeholders" → "v4-style-multi-tier"`
+      に bump(enrich 出力は未変更だが、後段の脚質判定変更で念のため bump)。
+
+  * **Phase 2(将来)候補**:
+    - 本番 `horses.parquet` / `pedigree.parquet` を投入できた時点で Tier 3
+      (父系統 → 脚質傾向テーブル)を追加。historical/races.parquet 全体から
+      `scripts/build_sire_style_table.py` で自動生成する設計。サンプル
+      < 50 走の父系統は除外して信頼度を担保。
+    - confidence に応じた UI 表示(low/default 馬に小さい「?」マーク)。
+      お父様の判断を惑わせないよう小さく目立たない表示が前提。
+    - G-Style 5 ルールの matcher に confidence 引数を追加して、default 馬
+      では発火させない厳格化オプション(現状は default でも発火する)。
+
+  * **将来の誤認防止メモ**: 「corner_1 が取れていない = データ品質が悪い」
+    ではなく **JRA の仕様**(短距離戦は 1F 通過順位を取らない)。corner_3 /
+    corner_4 は短距離でもほぼ全走で取れているため、これらを補助情報として
+    使うのが正攻法。今後脚質ロジックを触る時はこの corner 欠損パターンを
+    必ず確認してから設計すること(推測ではなく実機データで確認)。
+
+  * v1.4 ロジック骨格 完全不変、v1.5.x 性能改善維持、v1.7.0 純正暗転維持、
+    v1.8.0 配点維持、v1.9.0 G ルール 11 件完全維持、session_state 既存キー
+    破壊なし、F4/F5/F4穴/F5穴 維持。
