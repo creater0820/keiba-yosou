@@ -1425,10 +1425,13 @@ if race_card_df is not None and historical is not None:
 
         # race_card_df は上の post-sidebar enrich 共通パスで既に補完済み。
         # cache_hash は馬場切替で予想結果が変わる DC モードのみ going を含める。
-        cache_hash = file_hash
+        # v1.9.1: 脚質判定 schema バージョンを混ぜて、多段フォールバック導入で
+        # 古いバージョンの予想結果が cache hit で返らないようにする。
+        from utils.race_history import STYLE_SCHEMA_VERSION  # 遅延 import
+        cache_hash = f"{file_hash}_{STYLE_SCHEMA_VERSION}"
         if race_card_df.attrs.get("data_format") == "dc":
             today_going = race_card_df.attrs.get("dc_going", "良")
-            cache_hash = f"{file_hash}_dc_{today_going}"
+            cache_hash = f"{cache_hash}_dc_{today_going}"
 
         # v1.5: 坂路調教 CSV があれば事前にパース + マッチして cached に渡す。
         training_match: dict[str, dict] = {}

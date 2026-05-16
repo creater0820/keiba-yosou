@@ -80,6 +80,9 @@ class HorseRating:
     # v1.3: TARGET 指数(ZI、col[5])は **参考値** として保持するが
     # total_rating には含めない。UI で「参考: TARGET 指数 = X」表示用。
     target_index: int = 0
+    # v1.9.1: 脚質判定の信頼度("high"/"medium"/"default")。default 値は "high"
+    # で後方互換維持。後段で UI に「?」マーク表示やバックテスト分析に使う。
+    running_style_confidence: str = "high"
 
 
 # =====================================================================

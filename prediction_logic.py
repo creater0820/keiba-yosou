@@ -47,7 +47,11 @@ from utils.judgment_engine import (
     get_last_finishing_positions,
 )
 from utils.onmark_rules import collect_onmarks
-from utils.race_history import determine_running_style, get_recent_runs_for_race
+from utils.race_history import (
+    determine_running_style,
+    determine_running_style_with_confidence,
+    get_recent_runs_for_race,
+)
 from utils.rating_engine import HorseRating, compute_horse_rating
 from utils.rating_rules import HONMEI_RATING_THRESHOLD
 
@@ -136,6 +140,12 @@ def _build_horse_mark_data(
     ].to_dict("records")
     pops_arr = pops.to_numpy() if hasattr(pops, "to_numpy") else list(pops)
 
+    # v1.9.1: 当日距離は脚質判定の Tier 4 デフォルト(過去走 0 馬用)で使う
+    try:
+        today_distance = int(race_card_df["distance"].iloc[0]) if not race_card_df.empty else None
+    except (TypeError, ValueError):
+        today_distance = None
+
     horses: list[HorseMarkData] = []
     for idx, row in enumerate(rc_records):
         hid = str(row["horse_id"])
@@ -149,7 +159,12 @@ def _build_horse_mark_data(
             frame = 0
 
         recent = history.get(hid, [])
-        style = determine_running_style(recent)
+        # v1.9.1: 多段フォールバック判定。distance を渡すことで過去走 0 馬でも
+        # 距離別デフォルト(短距離=先行 / 中長=差し)で脚質が決まる。
+        # HorseMarkData は confidence を持たないので style のみ取り出す。
+        style, _conf = determine_running_style_with_confidence(
+            recent, distance=today_distance,
+        )
         marks_count, matched = collect_onmarks(recent)
 
         try:
@@ -438,7 +453,11 @@ def predict_race_dc(
             # するが total_rating には含めない。お父様独自ロジック(C/D/E/F)の
             # 真の発火率で順位付けする方針。
             full_mode_count += 1
-            running_style = determine_running_style(runs)
+            # v1.9.1: 多段フォールバック判定。corner_1 不足時は corner_3/4 へ
+            # 自動降下、過去走 0 馬は距離別 default に降りる(全馬必ず脚質付与)。
+            running_style, style_conf = determine_running_style_with_confidence(
+                runs, distance=meta.get("distance"),
+            )
             last_pos = runs[0].get("finishing_position") if runs and runs[0] else None
             td = training_match.get(hid) if training_match else None
             rule_obj = compute_horse_rating(
@@ -469,11 +488,17 @@ def predict_race_dc(
                 evaluated_rule_ids=rule_obj.evaluated_rule_ids,
                 missed_rule_ids=rule_obj.missed_rule_ids,
                 target_index=int(round(ti)),  # 参考値として保持
+                running_style_confidence=style_conf,
             )
         else:
             # 簡易モード(マッチ失敗): rating = 0(評価不能を明示)。
             # TARGET 指数は target_index に「参考値」として保持。
-            running_style = "不明(先行扱い)"
+            # v1.9.1: 脚質は "不明(先行扱い)" を返さず、distance だけから
+            # default 判定(短距離=先行 / 中長=差し)。DC マッチ失敗で過去走
+            # 不在なので runs=[] を渡して Tier 4 直行になる。
+            running_style, style_conf = determine_running_style_with_confidence(
+                [], distance=meta.get("distance"),
+            )
             rating_obj = HorseRating(
                 horse_id=hid,
                 horse_name=str(row["horse_name"]),
@@ -487,6 +512,7 @@ def predict_race_dc(
                 today_carry_weight=None,
                 rule24_active=False,
                 target_index=int(round(ti)),  # 参考値として保持
+                running_style_confidence=style_conf,
             )
 
         horse_ratings.append(rating_obj)
