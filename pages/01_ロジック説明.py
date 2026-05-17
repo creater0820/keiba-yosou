@@ -3,7 +3,7 @@
 
 構成(上から):
   1) ロジック全体の 5 ステップ概要
-  2) レース選択(セッション内 or テストデータの morning_race_card)
+  2) レース選択(セッション内 or レガシーテストデータ legacy_dummy/morning_race_card)
   3) 2 カラム本体:
         左 = ルール定義(CLAUDE.md / utils/logic_spec.py の SSoT)
         右 = 実データ適用例(選択中レース or 全レース横断)
@@ -65,12 +65,17 @@ st.set_page_config(
 # データソース選択(セッション内 → テストデータ自動ロード)
 # =====================================================================
 
-TEST_RACE_CARD_PATH = Path("data/test/morning_race_card_20260503.csv")
+# v1.11.0: 正式運用フォーマットは DC 形式に統一(46 列、TARGET 出馬表 CSV)。
+# このページのデモデータは旧 morning_race_card 系(ヘッダ付き普通 CSV、馬名入り)
+# を引き続き使う(ロジック説明用なので「馬名表示があった方が分かりやすい」ため
+# DC 形式に切り替えていない)。本物の DC 形式サンプルは
+# data/test/dc_format_sample.csv を参照。
+TEST_RACE_CARD_PATH = Path("data/test/legacy_dummy/morning_race_card_20260503.csv")
 
 
 @st.cache_data(show_spinner="テスト用出馬表を読み込み中…")
 def _load_test_race_card() -> pd.DataFrame:
-    """data/test/morning_race_card_20260503.csv を読み込む。"""
+    """data/test/legacy_dummy/morning_race_card_20260503.csv を読み込む。"""
     raw = TEST_RACE_CARD_PATH.read_bytes()
     return load_race_card(io.BytesIO(raw))
 
@@ -372,7 +377,7 @@ if not predictions:
     st.info(
         "予想結果が利用できません。\n"
         "- app.py で出馬表をアップロード → 予想実行 すると、ここでもセッション内の結果が見られます\n"
-        "- それまでは `data/test/morning_race_card_20260503.csv` のテストデータが自動表示されます"
+        "- それまでは `data/test/legacy_dummy/morning_race_card_20260503.csv` のテストデータが自動表示されます"
     )
     st.stop()
 

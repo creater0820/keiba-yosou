@@ -137,8 +137,15 @@ def test_dc_error_message_constants():
 # 既存形式の後方互換確認(回帰テスト)
 # ==================================================================
 def test_existing_morning_race_card_still_loads():
-    """既存の morning_race_card_20260503.csv は DC 検出で誤って弾かれない。"""
-    morning = ROOT / "data" / "test" / "morning_race_card_20260503.csv"
+    """ヘッダ付き普通 CSV(legacy_dummy/morning_race_card_*.csv)が DC 検出で
+    誤って弾かれないことを確認する境界テスト。
+
+    v1.11.0 で正式入力フォーマットを DC 形式(46 列純数値)に統一したため、
+    morning_race_card 系は data/test/legacy_dummy/ に移動済。本テストは
+    「ヘッダ付き普通 CSV を DC として誤検出しない」境界条件の担保として
+    維持する。
+    """
+    morning = ROOT / "data" / "test" / "legacy_dummy" / "morning_race_card_20260503.csv"
     if not morning.exists():
         return  # CI 等にファイルがない場合はスキップ
     df = load_race_card(morning)

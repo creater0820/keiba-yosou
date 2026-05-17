@@ -7,7 +7,11 @@ Phase 2 動作確認デモ:
     python scripts/phase2_demo.py [race_id]
     例: python scripts/phase2_demo.py R20260503-京11
 
-引数省略時は morning_race_card_20260503.csv の 京都11R 天皇賞春で実行。
+引数省略時は legacy_dummy/morning_race_card_20260503.csv の 京都11R 天皇賞春で実行。
+
+⚠ v1.11.0: 当日出馬表の正式入力フォーマットは **DC 形式(46 列)** に統一。
+本スクリプトは Phase 2 開発当時のデモ用で、legacy_dummy 配下のヘッダ付き
+普通 CSV をそのまま使う(本物の DC 形式 demo は不要なため切替なし)。
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from utils.race_history import (  # noqa: E402
 )
 from utils.onmark_rules import collect_onmarks  # noqa: E402
 
-DEFAULT_CARD = "data/test/morning_race_card_20260503.csv"
+DEFAULT_CARD = "data/test/legacy_dummy/morning_race_card_20260503.csv"
 DEFAULT_RACE = "R20260503-京11"
 DEFAULT_HISTORICAL = "data/historical/races.parquet"
 
