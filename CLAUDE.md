@@ -32,17 +32,79 @@ Streamlit Community Cloud (無料プラン・公開リポジトリ)
 ## データ構造
 
 ### 過去データ(リポジトリ同梱、月1回更新)
-data/historical/races.parquet:
-  race_id, race_date, racecourse, race_number, race_name,
-  distance, surface, going, finishing_position, horse_id,
-  horse_name, jockey, trainer, weight, weight_change,
-  time, last_3f, popularity, odds
 
-data/historical/horses.parquet:
+**現状(v1.10.0 時点)**: `data/historical/races.parquet` のみ本番投入済(2.85 MB)。
+`horses.parquet` / `pedigree.parquet` は **本番未配置**(`data/samples/sample_historical/`
+にだけ存在)。これは v1.9.1 で Tier 3(父系統テーブル)を断念した直接の原因。
+
+#### races.parquet スキーマ(26 列、v1.10.0 正式仕様化)
+| 列名 | dtype | サンプル値 |
+|---|---|---|
+| race_id | str | `R20230722-札01`(13 桁、`R<YYYYMMDD>-<場1文字><RR>`)|
+| race_date | str | `2023-07-22`(YYYY-MM-DD)|
+| racecourse | str | `札幌` / `東京` …(漢字、JRA 10 場所)|
+| race_number | Int64 | 1〜12 |
+| race_name | str | `未勝利*` 等 |
+| post_time | str | `10:00`(HH:MM)|
+| distance | Int64 | m |
+| surface | str | `芝` / `ダ` |
+| going | str | `良` / `稍` / `重` / `不`(1 文字)|
+| finishing_position | Int64 | **着順(0=中止/除外/失格/取消、1,336 件存在)** |
+| horse_number | Int64 | 馬番 |
+| horse_id | str | **8 桁数字**(全件、ゼロパディング維持)|
+| horse_name | str | カナ |
+| jockey | str | 漢字 |
+| trainer | str | 漢字 |
+| weight | Int64 | 馬体重 kg |
+| carry_weight | float64 | 斤量 kg |
+| weight_change | int64 | 体重増減 |
+| time | str | `1:10.30`(M:SS.X)|
+| last_3f | float64 | 上 3F 秒 |
+| popularity | Int64 | 単勝人気 |
+| odds | float64 | 単勝オッズ |
+| corner_1 | Int64 | 1 コーナー順位(**null 率 55.98%**、JRA 仕様で短距離戦は記録なし)|
+| corner_2 | Int64 | 2 コーナー順位(null 率 49.75%)|
+| corner_3 | Int64 | 3 コーナー順位(null 率 1.30%)|
+| corner_4 | Int64 | 4 コーナー順位(null 率 0.65%)|
+
+#### race_id 構築仕様
+- 形式: `R<YYYYMMDD>-<場の最初 1 文字><RR>` 13 桁
+- 場名 → 1 文字マップ: 札幌→札 / 函館→函 / 福島→福 / 新潟→新 / 東京→東 /
+  **中山→中 / 中京→中** / 京都→京 / 阪神→阪 / 小倉→小
+- ⚠️ **中山と中京が同一プレフィックス「中」になる**既知制約(既存
+  v1.0〜v1.9.x からの仕様)。同日に両場で開催があり同馬が両場走った場合
+  (実運用上ほぼ起きない)、(race_id, horse_id) 複合キー dedup が衝突する
+  リスクあり。実害は出ていない。将来内外区別を含めた race_id v2 への
+  移行余地として残す。
+
+#### 過去データ最新化パイプライン(v1.10.0 で構築)
+- **入力**: TARGET frontier JV の **SE(成績)形式 CSV**(Shift_JIS、52 列、
+  ヘッダなし)
+- **パーサ**: `utils/target_history_parser.py`(既存 `utils/target_format.py`
+  とは完全独立、当日 CSV 処理フローを一切変更しない)
+- **更新スクリプト**: `scripts/update_historical_parquet.py`
+  - CLI: `--input`(ファイル or ディレクトリ)/ `--dry-run` / `--no-backup` /
+    `--restore <bak>`
+  - (race_id, horse_id) 複合キー dedup(既存優先)
+  - 自動バックアップ: `data/historical/races.parquet.bak.YYYYMMDD_HHMMSS`
+- **Streamlit UI**: `pages/02_過去データ更新.py`(お父様向け、コマンドライン不要)
+
+#### SE 形式 → 既存 parquet 列マッピング(52 列→26 列)
+全列の意味と用途は `utils/target_history_parser.py` の docstring に記載。
+要点:
+- SE には **corner_1/corner_2 が含まれない**(短距離戦の JRA 仕様)→ pd.NA で埋める
+- SE には **post_time が含まれない** → 空文字 `""` で埋める
+- SE には **weight_change が含まれない** → 0 (int) で埋める
+- horse_id は 8 桁ゼロパディング維持
+- 走破タイム "1114" → "1:11.4"、"12345" → "12:34.5" に変換
+- 着順 0(中止・除外・失格・取消)は **そのまま取り込む**(既存 parquet と
+  同一仕様、skip しない)
+
+data/historical/horses.parquet(**本番未配置、v1.9.1 で Tier 3 断念の根拠**):
   horse_id, horse_name, sex, age, sire, dam, dam_sire,
   total_starts, wins, places, shows
 
-data/historical/pedigree.parquet:
+data/historical/pedigree.parquet(**本番未配置**):
   horse_id, sire_line, broodmare_sire_line, inbreeding_score
 
 ### 当日データ(お父様がアップロード、CSV形式)
@@ -1055,3 +1117,116 @@ keiba-yosou/
   * v1.4 ロジック骨格 完全不変、v1.5.x 性能改善維持、v1.7.0 純正暗転維持、
     v1.8.0 配点維持、v1.9.0 G ルール 11 件完全維持、session_state 既存キー
     破壊なし、F4/F5/F4穴/F5穴 維持。
+- **v1.10.0 infra**(現行、2026-05): **過去 parquet 最新化パイプライン構築**。
+  TARGET frontier JV の SE(成績)形式 CSV を取り込んで `races.parquet` を
+  追記更新する仕組みを新規追加。**既存の当日 CSV 処理フロー(DC/RA+SE
+  パーサ、enrich、predict)は完全不変** — 新規モジュールとして物理的に
+  分離した。
+
+  * **動機**: 既存 parquet は 2026-05-03 までで止まっており、5/4 以降のレース
+    と 2026 年新規参戦馬が未登録。v1.9.1 の脚質 Tier 4 default 比率
+    22.2% の **約半分** はこの DC マッチ失敗(過去走 0 走 + DB 未登録)が原因。
+    お父様が月 1 回程度の頻度で安全に parquet を更新できる UI が必要だった。
+
+  * **既存 parquet スキーマの完全把握(Step 1)**:
+    - 行数 159,724 / レース 10,743 / 馬 23,039
+    - 期間 2023-01-05 〜 2026-05-03、JRA 10 場所収録、ファイルサイズ 2.80 MB
+    - 26 列 / dtype 全確定 / (race_id, horse_id) 複合キー完全ユニーク
+    - finishing_position に 0(中止・除外・失格・取消)が 1,336 件存在
+      → 新パーサも skip せず取り込む方針に決定
+    - corner_1 null 率 55.98% は v1.9.1 で発覚済(JRA 短距離仕様)
+    - **race_id 形式の正式化**: `R<YYYYMMDD>-<場 1 文字><RR>` 13 桁。
+      中山/中京は両方とも「中」プレフィックスで同一(既存仕様、CLAUDE.md
+      データ構造セクションに注記済)。
+
+  * **TARGET SE 形式の実機検証(Step 3a)**:
+    お父様の協力で `data/test/target_history_sample.csv`(2025-01-05〜
+    2026-05-10、65,869 行、4,397 レース、13,301 馬、18.03 MB、Shift_JIS、
+    52 列、ヘッダなし)を入手 → 全 52 列を実機ダンプし列マッピングを確定。
+    詳細は `utils/target_history_parser.py` docstring 参照。
+
+  * **新規モジュール**:
+    | ファイル | 役割 |
+    |---|---|
+    | `utils/target_history_parser.py` | SE 形式 → parquet 互換 DataFrame、独立モジュール |
+    | `scripts/update_historical_parquet.py` | CLI 更新 + バックアップ + dedup |
+    | `scripts/dump_parquet_schema.py` | 既存スキーマ実機ダンプ(参照用) |
+    | `pages/02_過去データ更新.py` | Streamlit UI(お父様向け) |
+    | `tests/test_target_history_parser.py` | 28 テスト(列マッピング・dtype・着順 0・horse_id 8 桁等) |
+    | `tests/test_update_historical_parquet.py` | 12 テスト(dedup・バックアップ・dry-run・べき等性) |
+
+  * **既存 parquet 保護方針**:
+    - 自動バックアップ: `races.parquet.bak.YYYYMMDD_HHMMSS`(--no-backup
+      しない限り常時作成)
+    - dry-run で件数確認してから本番取り込み
+    - 失敗時は parquet 未変更 + バックアップ残存 → 1 クリック復元可能
+
+  * **dedup ロジック**: `(race_id, horse_id)` 複合キーで既存優先。
+    入力 CSV 内の重複も先に除去してから既存 parquet と merge。
+    SE は過去日付も含めて出力できるが、既存と重複する分は自動スキップ。
+
+  * **dtype 完全互換**: 新パーサの出力 DataFrame は既存 parquet の 26 列
+    すべてで dtype が完全一致(test_parse_sample_dtypes_match_parquet_exactly
+    で担保)。混在による pandas 不整合を防ぐ。
+
+  * **実機取り込み結果(サンプル CSV)**:
+    | 指標 | 取り込み前 | 取り込み後 | 差分 |
+    |---|---|---|---|
+    | 行数 | 159,724 | 160,722 | **+998** |
+    | レース | 10,743 | 10,815 | +72 |
+    | 馬 | 23,039 | 23,070 | +31 |
+    | 期間 | 〜 2026-05-03 | 〜 **2026-05-10** | +7 日 |
+    | ファイルサイズ | 2.80 MB | 2.85 MB | +0.05 |
+    入力 65,869 行のうち 64,871 件は既存と重複 → 自動スキップ。
+    べき等性確認: 同じ CSV を 2 度取り込んでも追加 0 件、重複 65,869 件。
+
+  * **バックテスト(既存範囲は完全不変、新規範囲は基本動作確認)**:
+    | 範囲 | レース数 | ◎本命確定 | 1 着率 | 複勝率 | 単勝回収率 |
+    |---|---|---|---|---|---|
+    | v1.9.1 baseline(4/1〜5/3) | 336 | 84 | 14.29% | 29.76% | 695.4% |
+    | v1.10.0(4/1〜5/3) | 336 | 84 | **14.29%** | **29.76%** | **695.4%** |
+    | v1.10.0 新規(5/4〜5/10) | 72 | 16 | 12.50% | 31.25% | 31.9% |
+
+    既存範囲 = **±0.00 pt の完全一致**。parquet 拡張による regression なし
+    を実機実証。新規範囲の単勝回収率 31.9% は SE 由来の正確な単勝オッズが
+    取り込まれた結果(1 番人気が ◎ になる構造的特性、データ整合の証拠)。
+
+  * **DC マッチ率の改善は限定的**(想定通り):
+    - DC260509(5/9)の脚質 Tier 内訳は v1.9.1 と完全同一(Tier 4 = 22.2%)
+    - 理由: 5/9 出走馬の前走はほぼ全て 5/4 より前。今回追加した 5/4〜5/10
+      の 998 行は「5/9 出走馬の前走」候補にほぼ含まれない
+    - **真の効果検証**は、お父様が「2025-04 以前」「2026-01〜04」など
+      別期間の SE CSV を取り込んでから(Tier 4 馬の前走を埋められる範囲)
+
+  * **判定基準**:
+    - ✅ 既存 parquet 破壊なし(整合性 spot check OK)
+    - ✅ 複勝率 ±0.5 pt 以内(既存範囲で完全一致)
+    - ✅ 既存テスト 173 件 pass + 新規 40 件追加 = 全 **213 テスト pass**
+    - ✅ 既存 CSV 処理フロー(DC/RA+SE パーサ、enrich、predict)未変更
+      (新パーサは utils/target_history_parser.py に物理分離)
+    - ⚠️ Tier 4 default 22.2% → 5% 以下の達成は **広範囲データ取り込み後**
+
+  * **お父様向け運用ガイド(Streamlit UI)**:
+    1. サイドバーから「過去データ更新」ページを開く
+    2. SE 形式 CSV をドラッグ&ドロップ(複数同時可)
+    3. 初回は「🧪 ドライラン」で件数確認
+    4. 問題なければチェック外して「🚀 取り込み実行」
+    5. 自動でバックアップ作成 + dedup + parquet 更新
+    6. 完了後はサイドバーの「過去レース数」が自動更新
+
+  * **トラブルシューティング(復元手順)**:
+    - Streamlit UI:「💾 バックアップ管理」セクションの「⏪ 復元」ボタン
+    - CLI: `python scripts/update_historical_parquet.py --restore data/historical/races.parquet.bak.YYYYMMDD_HHMMSS`
+
+  * **Phase 2 候補(v1.10.x 以降)**:
+    - `horses.parquet` / `pedigree.parquet` の本番投入(v1.9.1 で延期した
+      Tier 3 父系統テーブルの復活)
+    - SE CSV 内の血統情報(col[43-45] = 父/母/母父)を使って sire 列追加
+    - 取り込み時に内/外コード(col[10])を活用した race_id v2 移行
+      (中山/中京衝突解消、G11 新潟外回り Phase 2 復活)
+    - 体重増減 を SE 以外のソース(JRA-VAN DataLab 等)から補完
+    - 自動定期更新(GitHub Actions で月 1 回 SE エクスポートを取り込み)
+
+  * v1.4 ロジック骨格 完全不変、v1.5.x 性能改善維持、v1.7.0 純正暗転維持、
+    v1.8.0 配点維持、v1.9.0 G ルール維持、v1.9.1 脚質多段フォールバック
+    維持、session_state 既存キー破壊なし、既存 CSV 処理フロー絶対不変。
