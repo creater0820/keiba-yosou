@@ -71,3 +71,4 @@ data/uploads/*
 # 動作確認用のスクリーンショット(Playwright 等で生成)
 screenshots/
 scripts/diagnose_style_failures_output.json
+data/historical/*.bak.*
