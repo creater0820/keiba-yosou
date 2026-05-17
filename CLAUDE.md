@@ -29,6 +29,46 @@ Streamlit Community Cloud (無料プラン・公開リポジトリ)
 - Parquet: 1年分の過去データを CSV ではなく Parquet で持つことで GitHub の100MB制限内に収まる(120MB → 12MB)
 - リポジトリ同梱: Streamlit Cloud はセッション間でアップロードファイルを保持しないため、固定データはリポジトリに含める
 
+## 入力ファイルフォーマット仕様(v1.11.0 で明文化)
+
+### 当日出馬表(DC 形式、**正式版**)
+- **用途**: 予想実行ボタン押下時の入力データ(お父様の日常運用)
+- **TARGET frontier JV メニュー**: 「出馬表 CSV 形式」エクスポート
+- **エンコーディング**: Shift_JIS
+- **列数**: **46**(純数値、ヘッダなし)
+- **ファイル名例**: `DC260517.CSV`, `当日出馬表-xxxxxxxx.CSV`
+- **特徴**: 馬名・騎手名・血統登録番号を**含まない**(数値メタデータのみ)
+- **本物のサンプル**:
+  - `data/test/dc_format_sample.csv`(別期日)
+  - `data/raw/DC260509.CSV`(2026/5/9)
+  - `data/raw/当日出馬表-47821f30.CSV`(同上、別エクスポート)
+- **パーサ**: `utils/target_format.py` の `parse_dc_dataframe` / `is_dc_format`
+- **連携**: `data_loader.enrich_dc_with_historical_cached` で過去走パターン
+  マッチで馬名引当 → 上限 77-78%、残り 22% は脚質 Tier 4 default
+
+### 過去成績(SE 形式)
+- **用途**: `pages/02_過去データ更新.py` からのアップロード(月 1 回程度)
+- **TARGET frontier JV メニュー**: 成績エクスポート
+- **エンコーディング**: Shift_JIS
+- **列数**: **52**(馬名・騎手名・着順・タイム・上 3F 入り、ヘッダなし)
+- **ファイル名例**: `target_history_sample.csv`
+- **本物のサンプル**: `data/test/target_history_sample.csv`
+- **パーサ**: `utils/target_history_parser.py`(v1.10.0 新規、DC パーサとは
+  完全独立)
+- **更新**: `scripts/update_historical_parquet.py` または Streamlit UI
+  「過去データ更新」ページ
+
+### RA+SE 形式(**実在未確認、保留**)
+- 当日出馬表に馬名を含む形式が TARGET に実在するかは未確認
+- 既存コードに `utils/target_format.parse_jra_van_dataframe` や
+  `is_jra_van_headerless`、ヘッダ付き普通 CSV 経路があるが、これらは
+  開発初期にダミーデータ(過去走から仮抽出した `morning_race_card_*.csv`)
+  で設計されたもので、**本物の TARGET エクスポートでの動作は未検証**
+- 将来お父様の TARGET 操作で実在することが確認できれば v1.12.0 以降で
+  正式対応(現状はコードを残して保留)
+- ダミーは `data/test/legacy_dummy/morning_race_card_20260503.csv`
+  (DC 検出の境界テスト + ロジック説明ページの demo データ用に維持)
+
 ## データ構造
 
 ### 過去データ(リポジトリ同梱、月1回更新)
@@ -1230,3 +1270,90 @@ keiba-yosou/
   * v1.4 ロジック骨格 完全不変、v1.5.x 性能改善維持、v1.7.0 純正暗転維持、
     v1.8.0 配点維持、v1.9.0 G ルール維持、v1.9.1 脚質多段フォールバック
     維持、session_state 既存キー破壊なし、既存 CSV 処理フロー絶対不変。
+- **v1.11.0 chore**(現行、2026-05): **DC 形式正式化とリポジトリ整理**。
+  ユーザーとの協議で当日出馬表の正式入力フォーマットを **DC 形式(46 列、
+  TARGET 出馬表 CSV)** に統一。コードロジック変更ゼロ、リポジトリ整理 +
+  ドキュメント更新が中心。
+
+  * **経緯**: v1.10.0 完了後の運用検討で以下が判明:
+    - 既存リポジトリ内の `morning_race_card_*.csv` 系は開発初期に過去
+      データから仮抽出された **ダミー**(`scripts/extract_one_day.py` で
+      生成された) — 本物の TARGET エクスポートではない
+    - 当日出馬表で「馬名入り CSV」が TARGET に実在するかは未確認
+      (`parse_jra_van_dataframe` 等のコードはダミーデータで設計されたもの)
+    - 一方、お父様が日常的にアップロードしているのは **DC 形式**(46 列、
+      純数値、馬名なし) — これが**唯一の確認済み正式運用パス**
+    - DC 形式の構造的制約による脚質 Tier 4 default 22.2% は、v1.10.0
+      バックテストで複勝率・回収率に**実害ゼロ**を確認済
+
+  * **変更点(整理 + 文書化のみ、コード変更ゼロ)**:
+    - `data/test/morning_race_card_20260503.csv` を
+      `data/test/legacy_dummy/` に移動 + README.md 追加
+    - 本物の DC 形式サンプル `data/test/dc_format_sample.csv` を正式配置
+      (元: `data/raw/当日出馬表-47821f30.CSV`、46 列、26 レース分、
+      `is_dc_format()=True` 確認済)
+    - コード内の `morning_race_card_*.csv` 参照を 4 箇所更新:
+      - `tests/test_target_format_dc.py:test_existing_morning_race_card_still_loads`
+        → 新パス + docstring に「v1.11.0 で legacy_dummy/ に移動済」明記
+      - `scripts/extract_one_day.py` → 出力先を `legacy_dummy/` に変更、
+        docstring に「ダミー生成スクリプト」と明示
+      - `scripts/phase2_demo.py` → DEFAULT_CARD パス更新、docstring 注記
+      - `pages/01_ロジック説明.py` → デモデータパス更新(ロジック説明は
+        馬名表示があった方が分かりやすいため legacy_dummy を継続採用)
+    - CLAUDE.md に **入力ファイルフォーマット仕様セクションを新設**
+      (DC 正式 / SE 過去成績 / RA+SE 未確認保留 の 3 形式を明文化)
+
+  * **22% 脚質機械デフォルトの構造的理由(永続記録)**:
+
+    DC 形式 CSV には馬名・血統登録番号が含まれないため、
+    `historical/races.parquet` との照合は「過去走パターンマッチ」
+    (`utils/horse_matcher.match_all_dc_horses` による日付 + 距離の
+    weeks_since_prior チェーン遡及)に依存する。このマッチングの精度
+    上限は実機計測(DC260509、495 馬)で **77-78%**:
+
+    | 内訳 | 頭数 | 割合 |
+    |---|---|---|
+    | Tier 1a (corner_1≥3) | 167 | 33.7% |
+    | Tier 1b (corner_3≥3、短距離主救済) | 213 | 43.0% |
+    | Tier 1c (corner_4≥3、medium) | 1 | 0.2% |
+    | Tier 2 (1-2 走、medium) | 4 | 0.8% |
+    | **Tier 4 (距離別 default)** | **110** | **22.2%** |
+    | Tier 5 (絶対 default) | 0 | 0.0% |
+
+    Tier 4 の 110 頭は DC マッチ失敗(過去走 0 走 + DB 未登録)由来で、
+    距離別 default(短距離 ≤ 1400m → 先行 / 1400m 超 → 差し)を付与。
+
+  * **v1.10.0 バックテストでの実害評価**:
+    | 指標 | v1.9.0 | v1.9.1 (Tier 4 default 22.2% 適用) | 差 |
+    |---|---|---|---|
+    | 1 着率 | 14.29% | 14.29% | ±0.00 pt |
+    | 連対率 | 26.19% | 26.19% | ±0.00 pt |
+    | 複勝率 | 29.76% | 29.76% | ±0.00 pt |
+    | 単勝参考回収率 | 695.36% | 695.36% | ±0.00 pt |
+
+    → **22% 機械デフォルトは回収率・複勝率に実害なし** = 構造的限界として
+    受容しても問題なし。
+
+  * **改善余地(将来の伸びしろ)**:
+    - 過去 parquet を v1.10.0 パイプラインで月次最新化していけば、Tier 4
+      に落ちる馬(DB 未登録の若手馬)が徐々に減っていく
+    - お父様の TARGET 操作で「当日出馬表に馬名を含むエクスポート」が実在
+      することが確認できれば v1.12.0 以降で正式対応(現状は `parse_jra_van_dataframe`
+      等のコードを将来用に保持)
+    - SE col[43-45](父/母/母父)を historical に取り込んで sire 列追加
+      → v1.9.1 で延期した Tier 3 父系統テーブル復活の布石
+
+  * **保持されたもの**(全て不変):
+    - 既存 CSV パーサ(DC / 旧 RA+SE-like / ヘッダ付き普通 CSV 経路)
+    - 全ロジック(v1.4 骨格 / v1.5.x 性能改善 / v1.7.0 純正暗転 / v1.8.0 配点 /
+      v1.9.0 G ルール / v1.9.1 脚質多段 / v1.10.0 parquet 更新)
+    - session_state 既存キー / @st.cache_data キャッシュ仕様
+    - お父様の運用フロー(DC アップロード → 予想実行)
+    - 全 213 テスト pass(参照パス変更後も regression なし)
+
+  * **将来の誤認防止メモ**:
+    - `morning_race_card_*.csv` を見つけても **本物の TARGET エクスポート
+      ではない** と認識すること(開発初期のダミー)
+    - 当日入力の議論をする際は「**DC 形式が唯一の正式運用パス**」を前提に
+    - RA+SE 形式パーサのコード(`parse_jra_van_dataframe` 等)は実在未確認
+      なまま保持されているため、これに依拠した新機能設計は避ける

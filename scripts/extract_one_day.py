@@ -1,6 +1,14 @@
 """
+[v1.11.0 以降: ダミー生成スクリプト — 正式運用フォーマットは DC 形式]
+
 data/raw/races2023_2026.csv (TARGET frontier JV 形式) から特定日のレースだけ
-抽出して、結果列を空にした「朝の出馬表」相当の CSV を生成するスクリプト。
+抽出して、結果列を空にした「朝の出馬表」相当の **ダミー** CSV を生成する
+スクリプト。
+
+⚠ 重要: 当日出馬表の **正式入力フォーマットは DC 形式(46 列、TARGET 出馬表
+CSV エクスポート)** に v1.11.0 で統一されました。本スクリプトは過去データから
+仮抽出した legacy_dummy 用の出力です。本物の DC 形式サンプルは
+`data/test/dc_format_sample.csv` を参照してください。
 
 実行例:
     python scripts/extract_one_day.py 2026-05-03
@@ -8,7 +16,7 @@ data/raw/races2023_2026.csv (TARGET frontier JV 形式) から特定日のレー
 
 仕様:
 - 入力: data/raw/races*.csv (Shift_JIS、ヘッダーなし、52列)
-- 出力: data/test/morning_race_card_YYYYMMDD.csv
+- 出力: data/test/legacy_dummy/morning_race_card_YYYYMMDD.csv
         既定では結果列(着順/タイム/上3F 等)を空文字でクリア
         --keep-results オプションで結果も含めて出力可能
 - 出力エンコーディング: UTF-8-sig (BOM 付き)
@@ -34,7 +42,7 @@ import pandas as pd
 
 # data/raw/ にある TARGET 形式 CSV(複数あれば結合)
 RAW_DIR = Path("data/raw")
-OUT_DIR = Path("data/test")
+OUT_DIR = Path("data/test/legacy_dummy")
 
 # クリアする列インデックス(レース結果由来)
 # [19] = 馬番、[24] = 単勝人気 は朝の出馬表に確定済 → クリアしない。
@@ -50,7 +58,7 @@ def main() -> None:
     parser.add_argument("--source", type=Path, default=None,
                         help="入力 CSV パス(未指定時は data/raw/races*.csv を全部結合)")
     parser.add_argument("--out", type=Path, default=None,
-                        help="出力先(未指定時は data/test/morning_race_card_YYYYMMDD.csv)")
+                        help="出力先(未指定時は data/test/legacy_dummy/morning_race_card_YYYYMMDD.csv)")
     args = parser.parse_args()
 
     # 日付パース
