@@ -1330,7 +1330,7 @@ def render_predictions_section(
 # =====================================================================
 # 過去データの読み込み
 # =====================================================================
-HISTORICAL_DATA_SCHEMA_VERSION = "v4-rating-engine"
+HISTORICAL_DATA_SCHEMA_VERSION = "v5-odds-fix"  # v1.14.0: odds 列を真の単勝オッズに修正(cache 無効化)
 
 
 @st.cache_data(show_spinner="過去データを読み込み中…")
