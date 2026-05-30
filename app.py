@@ -37,6 +37,10 @@ from prediction_logic import (
     RacePrediction,
     predict_all_races_cached,
 )
+from utils.probability_engine import (
+    DEFAULT_TEMPERATURE,
+    compute_race_probabilities,
+)
 from utils.recent_runs_renderer import render_recent_runs_matrix
 from utils.training_data import (
     match_training_to_horses,
@@ -197,8 +201,116 @@ def _horse_score(pred: RacePrediction, horse_id: str) -> int:
     return h.marks_count if h else 0
 
 
-def _render_section_main_pick(pred: RacePrediction) -> None:
-    """セクション 1: 本命・注目馬"""
+# =====================================================================
+# v1.12.0 Phase 1: 確率派生(表示用)
+# =====================================================================
+def _current_temperature() -> float:
+    """サイドバーの Softmax 温度スライダーの現在値(未設定なら既定)。"""
+    return float(st.session_state.get("softmax_temperature", DEFAULT_TEMPERATURE))
+
+
+def _build_prob_by_id(pred: RacePrediction, temperature: float) -> dict:
+    """1 レース分の {horse_id: HorseProbability} を現在の温度 T で再計算する。
+
+    rating には一切触れず、horse_ratings から softmax で派生するだけ。
+    onmark モード(horse_ratings 空)や rating 非保持なら空 dict を返す。
+    B1/B2 減点馬は除外馬として確率 0 になる。
+    """
+    ratings = getattr(pred, "horse_ratings", None) or []
+    if not ratings:
+        return {}
+    excluded_ids = {d.horse_id for d in pred.demerit_entries}
+    probs = compute_race_probabilities(
+        ratings, excluded_ids=excluded_ids, temperature=temperature,
+    )
+    return {p.horse_id: p for p in probs}
+
+
+def _fmt_pct(value) -> str:
+    """確率(0.0〜1.0)を「X.X%」表記に。None/未計算は「—」。"""
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _render_probability_table(pred: RacePrediction, prob_by_id: dict) -> None:
+    """全頭の単勝/複勝確率ランキング表(単勝確率の高い順)。
+
+    仕様サンプルの「マーク/馬番/馬名/rating/単勝確率/複勝確率」に沿う。
+    rating は内部信号、確率は softmax 派生の表示値であることを明記する。
+    """
+    rows = []
+    for r in pred.horse_ratings:
+        p = prob_by_id.get(r.horse_id)
+        if p is None:
+            continue
+        if r.horse_id == pred.judgment.main_pick:
+            mark = "◎"
+        elif r.horse_id == pred.judgment.sub_pick:
+            mark = "準◎"
+        elif p.is_excluded:
+            mark = "⚠減点"
+        else:
+            mark = ""
+        rows.append({
+            "_sort": p.win_prob,
+            "マーク": mark,
+            "馬番": r.horse_number,
+            "馬名": r.horse_name,
+            "rate": r.total_rating,
+            "単勝確率": _fmt_pct(p.win_prob),
+            "複勝確率": _fmt_pct(p.place_prob),
+        })
+    if not rows:
+        return
+    rows.sort(key=lambda x: -x["_sort"])
+    for row in rows:
+        del row["_sort"]
+
+    prob_col_config = {
+        "マーク": st.column_config.TextColumn("マーク", width="small"),
+        "馬番": st.column_config.NumberColumn("馬番", width="small", format="%d"),
+        "馬名": st.column_config.TextColumn("馬名", width="medium"),
+        "rate": st.column_config.NumberColumn("rate", width="small", format="%d"),
+        "単勝確率": st.column_config.TextColumn("単勝確率", width="small"),
+        "複勝確率": st.column_config.TextColumn("複勝確率", width="small"),
+    }
+    with st.expander("📈 確率ランキング(全頭・単勝確率順)", expanded=False):
+        st.caption(
+            "rating から softmax で派生した参考確率です(rating 値・◎判定・"
+            "買い目には影響しません)。当日の馬場・パドック・展開は反映していません。"
+        )
+        tbl_col, _ = st.columns([3, 2])
+        with tbl_col:
+            st.dataframe(
+                pd.DataFrame(rows),
+                hide_index=True,
+                column_config=prob_col_config,
+                use_container_width=True,
+            )
+
+
+def _prob_suffix(prob_by_id: dict | None, horse_id: str) -> str:
+    """軸馬バナー用の「/ 単勝 X.X%・複勝 Y.Y%」サフィックスを作る。"""
+    if not prob_by_id:
+        return ""
+    p = prob_by_id.get(horse_id)
+    if p is None:
+        return ""
+    return f" / 単勝 {_fmt_pct(p.win_prob)}・複勝 {_fmt_pct(p.place_prob)}"
+
+
+def _render_section_main_pick(
+    pred: RacePrediction, prob_by_id: dict | None = None,
+) -> None:
+    """セクション 1: 本命・注目馬
+
+    v1.12.0: prob_by_id({horse_id: HorseProbability})が渡されると、軸馬バナーと
+    注目馬テーブルに softmax 派生の単勝/複勝確率を併記する(rating は不変)。
+    """
     st.markdown("**🏆 本命・注目馬**")
     j = pred.judgment
     rating_mode = _is_rating_mode(pred)
@@ -211,6 +323,7 @@ def _render_section_main_pick(pred: RacePrediction) -> None:
             st.success(
                 f"◎本命: 馬番{axis.horse_number} **{axis.horse_name}** "
                 f"({_format_horse_runtime(axis)}) {_score_label(pred, score)}"
+                f"{_prob_suffix(prob_by_id, axis.horse_id)}"
             )
     elif j.sub_pick:
         sub = next((h for h in pred.horses if h.horse_id == j.sub_pick), None)
@@ -219,7 +332,8 @@ def _render_section_main_pick(pred: RacePrediction) -> None:
             note = "※rating ≥ 100 の本命候補なし" if rating_mode else "※○≥5 の本命候補なし"
             st.warning(
                 f"準◎: 馬番{sub.horse_number} **{sub.horse_name}** "
-                f"({_format_horse_runtime(sub)}) {_score_label(pred, score)} "
+                f"({_format_horse_runtime(sub)}) {_score_label(pred, score)}"
+                f"{_prob_suffix(prob_by_id, sub.horse_id)} "
                 f"{note}"
             )
     else:
@@ -251,22 +365,26 @@ def _render_section_main_pick(pred: RacePrediction) -> None:
         "馬名": st.column_config.TextColumn("馬名", width="medium"),
         "脚質": st.column_config.TextColumn("脚質", width="small"),
         "人気": st.column_config.NumberColumn("人気", width="small", format="%d"),
+        "単勝確率": st.column_config.TextColumn("単勝確率", width="small"),
+        "複勝確率": st.column_config.TextColumn("複勝確率", width="small"),
     }
 
     if rating_mode:
         sorted_notables = sorted(pred.horse_ratings, key=lambda x: -x.total_rating)
         notables = [h for h in sorted_notables if h.horse_id != axis_id and h.total_rating >= 1][:6]
         if notables:
-            rows = [
-                {
+            rows = []
+            for h in notables:
+                p = prob_by_id.get(h.horse_id) if prob_by_id else None
+                rows.append({
                     "rate": h.total_rating,
                     "馬番": h.horse_number,
                     "馬名": h.horse_name,
                     "脚質": h.running_style,
                     "人気": h.popularity if h.popularity > 0 else 0,
-                }
-                for h in notables
-            ]
+                    "単勝確率": _fmt_pct(p.win_prob) if p else "—",
+                    "複勝確率": _fmt_pct(p.place_prob) if p else "—",
+                })
             st.markdown("注目馬(rate ≥ 1):")
             tbl_col, _ = st.columns([3, 4])
             with tbl_col:
@@ -276,6 +394,11 @@ def _render_section_main_pick(pred: RacePrediction) -> None:
                     column_config=notable_col_config,
                     use_container_width=True,
                 )
+
+        # v1.12.0: 全頭の確率ランキング表(単勝確率の高い順)。
+        # rating は内部信号、確率は派生表示。マーク列で◎/準◎を併記する。
+        if prob_by_id:
+            _render_probability_table(pred, prob_by_id)
     else:
         notables = [
             h for h in sorted(pred.horses, key=lambda x: -x.marks_count)
@@ -440,6 +563,7 @@ def _esc(s: str) -> str:
 def _build_all_marks_html(
     pred: RacePrediction,
     training_uploaded: bool,
+    prob_by_id: dict | None = None,
 ) -> str:
     """全頭詳細セクションの中身を 1 つの HTML 文字列にまとめる(pure)。
 
@@ -459,9 +583,17 @@ def _build_all_marks_html(
             elif r.horse_id == pred.judgment.sub_pick:
                 mark_label = "準◎ "
             pop_str = f"{r.popularity}人気" if r.popularity > 0 else "人気不明"
+            prob_str = ""
+            if prob_by_id:
+                _p = prob_by_id.get(r.horse_id)
+                if _p is not None:
+                    prob_str = (
+                        f" | 単勝 {_fmt_pct(_p.win_prob)}"
+                        f"・複勝 {_fmt_pct(_p.place_prob)}"
+                    )
             head = _esc(
                 f"{mark_label}馬番{r.horse_number} {r.horse_name} "
-                f"({r.running_style} / {pop_str}) rate {r.total_rating}"
+                f"({r.running_style} / {pop_str}) rate {r.total_rating}{prob_str}"
             )
             body: list[str] = []
             if is_dc:
@@ -585,12 +717,16 @@ def _build_all_marks_html(
     return "".join(parts)
 
 
-def _render_section_all_marks(pred: RacePrediction) -> None:
+def _render_section_all_marks(
+    pred: RacePrediction, prob_by_id: dict | None = None,
+) -> None:
     """セクション 6: 全頭の rating / ○マーク詳細(評価試行ログ込み)。
 
     perf 改善: 中身を _build_all_marks_html で 1 つの HTML 文字列に集約し、
     Streamlit ウィジェット呼び出しを 1 回(st.markdown)に削減。馬ごとの
     折り畳みは HTML `<details>` で実現。
+
+    v1.12.0: prob_by_id を渡すと各馬の見出しに単勝/複勝確率を併記する。
     """
     rating_mode = _is_rating_mode(pred)
     section_title = "全頭の rating 詳細" if rating_mode else "全頭の○マーク詳細"
@@ -601,7 +737,9 @@ def _render_section_all_marks(pred: RacePrediction) -> None:
         training_uploaded = (
             st.session_state.get("uploaded_training_bytes") is not None
         )
-        html = _ALL_MARKS_CSS + _build_all_marks_html(pred, training_uploaded)
+        html = _ALL_MARKS_CSS + _build_all_marks_html(
+            pred, training_uploaded, prob_by_id,
+        )
         st.markdown(html, unsafe_allow_html=True)
 
 
@@ -848,7 +986,10 @@ def render_predictions_section(
         if p.judgment.main_pick is not None:
             title = f":green[{title}]"
         with st.expander(title, expanded=False):
-            _render_section_main_pick(p)
+            # v1.12.0: 現在の Softmax 温度 T で確率を再計算(rating は不変)。
+            # スライダー変更時は full rerun → fragment 再実行でここが走り直す。
+            prob_by_id = _build_prob_by_id(p, _current_temperature())
+            _render_section_main_pick(p, prob_by_id)
             st.divider()
             _render_section_wide(p)
             st.divider()
@@ -899,7 +1040,7 @@ def render_predictions_section(
                     cache_key=_matrix_key,
                 )
 
-            _render_section_all_marks(p)
+            _render_section_all_marks(p, prob_by_id)
 
 
 # =====================================================================
@@ -1119,6 +1260,29 @@ with st.sidebar:
         key="font_scale",
         label_visibility="collapsed",
         help="老眼配慮の段階調整。「標準」=現行サイズ、最大で約 1.3 倍。",
+    )
+    st.divider()
+
+    # ----- v1.12.0: Softmax 温度 T(確率表示の鋭さ調整) -----
+    # rating から単勝/複勝確率を派生する softmax の温度。大きいほど横並び
+    # (フラット)、小さいほど高 rating 馬に確率が集中する。rating 値・◎判定・
+    # 買い目には一切影響しない(確率は派生表示のみ)。
+    st.subheader("🎲 確率表示設定")
+    st.slider(
+        label="Softmax 温度 T",
+        min_value=10,
+        max_value=50,
+        value=int(st.session_state.get("softmax_temperature", DEFAULT_TEMPERATURE)),
+        step=5,
+        key="softmax_temperature",
+        help=(
+            "rating から単勝/複勝確率を派生する分布の鋭さ。"
+            "大きいほど横並び、小さいほど上位馬に集中。"
+            "rating・◎判定・買い目には影響しません。"
+        ),
+    )
+    st.caption(
+        "確率は rating からの派生表示です(当日の馬場・パドック・展開は反映しません)。"
     )
     st.divider()
 

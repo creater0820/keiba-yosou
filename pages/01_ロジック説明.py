@@ -324,6 +324,37 @@ st.caption(
     "実データ(出馬表 + 過去走 Parquet)への適用結果と並べて表示します。"
 )
 
+with st.expander("🆕 v1.12.0 Phase 1: 確率派生(softmax)について", expanded=False):
+    st.markdown(
+        r"""
+**rating は内部信号、確率は派生表示** — このフェーズで rating ロジックは
+**一切変えていません**。予想結果(◎○▲△ / rating / 買い目)は従来と完全に同じです。
+
+新しく、各レース内で rating から **単勝確率** と **複勝確率(1-3 着内)** を計算して
+表示するようにしました。
+
+- **単勝確率(softmax、温度 T)**: rating が高い馬ほど高くなる、合計 100% の確率。
+
+$$ p_i = \frac{\exp(\text{rating}_i / T)}{\sum_j \exp(\text{rating}_j / T)} $$
+
+  温度 T が大きいほど分布は横並び(フラット)に、小さいほど高 rating 馬に集中します。
+  サイドバーの「🎲 確率表示設定」スライダーで T を変えると表示が即座に切り替わります。
+
+- **複勝確率(Plackett-Luce、1-3 着内)**: 1 着・2 着・3 着のいずれかに入る確率。
+
+$$ P(i \in \text{1-3着}) = P(i\text{=1着}) + P(i\text{=2着}) + P(i\text{=3着}) $$
+
+**注意**: この確率は rating からの **派生表示** であり、当日の馬場・パドック評価・
+展開などは反映していません。◎判定や買い目には一切影響しません。
+
+実装: `utils/probability_engine.py`(`compute_race_probabilities`)。rating エンジン
+(`utils/rating_engine.py`)とは完全に分離しています。
+
+**今後の予定**: Phase 2 = 確率 × オッズで期待値(EV)、Phase 3 = 確率ベースの
+◎○▲△再定義、Phase 4 = Kelly 基準の推奨投資額。
+        """
+    )
+
 # ----- ロジックモード切替トグル -----
 mode = st.radio(
     "ロジックモード",

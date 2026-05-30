@@ -1357,3 +1357,103 @@ keiba-yosou/
     - 当日入力の議論をする際は「**DC 形式が唯一の正式運用パス**」を前提に
     - RA+SE 形式パーサのコード(`parse_jra_van_dataframe` 等)は実在未確認
       なまま保持されているため、これに依拠した新機能設計は避ける
+- **v1.12.0 Phase 1**(現行、2026-05): **Softmax 確率派生 + 並列表示**。
+  既存 rating ロジックを **一切変えず**、レースごとに rating から softmax で
+  単勝確率を、Plackett-Luce で複勝確率(1-3 着内)を派生して UI に追加表示する
+  ハイブリッド方式。**rating は内部信号、確率は派生表示** が設計の核。
+
+  * **方針**: ユーザー(Yasu さん)と協議のうえ、(1) 既存 rating 加算ロジック
+    完全維持、(2) rating から softmax で確率派生、(3) ◎○▲△マークは現状維持
+    (Phase 3 で再検討)、(4) Phase 1 のゴールは「確率を見えるようにする」だけ。
+
+  * **仕様書からの設計修正(実コード整合)**: タスク擬似コードは
+    `HorsePrediction`(`.rating`/`.umaban`/`.is_excluded_b1_b2()`)前提だったが、
+    これは **未使用 shim**。本物の担体は `HorseRating`(`total_rating`/
+    `horse_number`、`utils/rating_engine.py`)。B1/B2 除外は
+    `judgment.demerit_entries`。よって確率は `HorseRating`/`rating_engine.py`
+    に **書き込まず**、`RacePrediction.horse_probabilities`(prediction_logic.py、
+    統合専用ファイル)に持たせ、「rating_engine.py / rating_rules.py /
+    course_bias_rules.py は触らない」を文字通り遵守した。
+
+  * **新規モジュール `utils/probability_engine.py`(完全分離)**:
+    - `compute_race_probabilities(horse_ratings, excluded_ids, temperature)`
+      → `list[HorseProbability]`(horse_id/horse_number/rating/win_prob/
+      place_prob/win_rank/is_excluded)
+    - 単勝確率(softmax、最大値減算でオーバーフロー回避):
+      `p_i = exp(rating_i / T) / Σ_j exp(rating_j / T)`
+    - 複勝確率(Plackett-Luce、O(n^3) ≈ 18 頭で 5,800 step):
+      `P(i∈1-3着) = P(i=1着) + P(i=2着) + P(i=3着)`
+    - B1/B2 除外馬は確率 0(計算からも除外)、active 馬の単勝確率合計 = 1.0
+    - `PROBABILITY_SCHEMA_VERSION = "v1-softmax-phase1"`
+
+  * **統合(prediction_logic.py)**:
+    - `RacePrediction.horse_probabilities` フィールド追加(`predict_race_v2` /
+      `predict_race_dc` 末尾で `DEFAULT_TEMPERATURE` でベイク)
+    - 互換 shim `HorsePrediction` に `win_prob/place_prob/win_rank` を Optional 追加
+    - `_derive_probabilities(horse_ratings, judgment)` で B1/B2 除外を反映
+
+  * **UI(app.py)**:
+    - サイドバー「🎲 確率表示設定」に Softmax 温度 T スライダー(10-50、既定 50)。
+      変更すると **表示時に現在の T で確率を再計算**(cache を汚さず即反映)。
+    - 本命バナーに「単勝 X.X%・複勝 Y.Y%」、注目馬テーブルに確率 2 列、
+      「📈 確率ランキング(全頭・単勝確率順)」表、全頭 rating 詳細の見出しにも併記。
+    - 「確率は rating からの派生表示。当日の馬場・パドック・展開は反映しません」注記。
+    - ロジック説明ページ(pages/01)に「v1.12.0 Phase 1: 確率派生(softmax)」
+      セクション(数式 + rating 不変の明記)。
+
+  * **キャリブレーション結果**(`scripts/calibrate_probability_v12.py`、
+    2026-01-01〜2026-05-10、**1,034 レース / 14,535 サンプル**):
+
+    | T | Brier ↓ | Log Loss ↓ | ECE ↓ |
+    |---|---|---|---|
+    | 10 | 0.09105 | 0.47793 | 0.08013 |
+    | 15 | 0.08242 | 0.36289 | 0.06258 |
+    | 20 | 0.07674 | 0.31429 | 0.04920 |
+    | 25 | 0.07307 | 0.29008 | 0.03953 |
+    | 30 | 0.07069 | 0.27675 | 0.03193 |
+    | 35 | 0.06912 | 0.26887 | 0.02600 |
+    | 40 | 0.06807 | 0.26396 | 0.02100 |
+    | **50** | **0.06685** | **0.25862** | **0.01414** |
+
+    - **採用 T = 50**(スライダー範囲内で Brier 最小 + ECE 最小=信頼性図が
+      最も対角線に近い)。判定基準クリア(Brier 0.067 < 0.20 / LogLoss 0.259 < 2.5)。
+    - **Brier は T とともに単調低下**: rating の spread が粗い(0 が多数)ため
+      鋭い softmax(低 T)は過信になりキャリブレーションが悪化する。希少事象
+      (~7% 勝率)では分布をフラットにするほど Brier が下がる性質も加わるが、
+      T=50 でも強い ◎(rating ~165 対 標準フィールド)は ~50% を保つため
+      情報量は失われない。スライダー上限 50 を既定にし、より鋭くしたい時は
+      ユーザーが下げられる設計。
+    - **信頼性図(T=50)**: 0-10% bin が実勝率 6.45%(予測 5.63%)でほぼ一致。
+      中位 bin(20-40%)は実勝率がやや下振れ(過信の残り)= rating モデル
+      由来で、T だけでは解消不可(Phase 3 で確率ベース再定義の検討対象)。
+
+  * **regression(v1.10.0 完全一致)**(`scripts/backtest_rating_v18.py`、
+    2026-04-01〜2026-05-03、336 レース):
+
+    | 指標 | v1.10.0 baseline | v1.12.0 | 差 |
+    |---|---|---|---|
+    | ◎本命確定 | 84 | **84** | ±0 |
+    | 1 着率 | 14.29% | **14.29%** | ±0.00 pt |
+    | 複勝率 | 29.76% | **29.76%** | ±0.00 pt |
+    | 単勝参考回収率 | 695.36% | **695.4%** | ±0.0 pt |
+
+    → 純粋追加(確率派生は判定/買い目/rating を読むだけ)のため **完全一致**。
+
+  * **テスト**: 全 **247 pass**(既存 213 + 新規 34: probability_engine 20 +
+    統合 6 + キャリブレーション関数 8)。Streamlit 起動 smoke 無エラー / AST OK。
+
+  * **Phase 2-4 ロードマップ**:
+    - Phase 2: 確率 × 単勝オッズで期待値(EV)→「お買い得」馬の検出
+    - Phase 3: ◎○▲△マークを確率ベースに再定義(バックテストで効果確認後)
+    - Phase 4: Kelly 基準による推奨投資額表示
+
+  * **将来の誤認防止メモ**:
+    - **rating の値・意味・閾値は不変**。確率は `probability_engine` の派生表示で、
+      `rating_engine.py` 等のロジックには一切書き込んでいない。
+    - 確率を触る時は `RacePrediction.horse_probabilities`(prediction_logic.py)と
+      `app.py` の `_build_prob_by_id` / `_render_probability_table` を見る。
+    - 確率は表示時にスライダー T で再計算する(ベイク値は既定/テスト基準)。
+
+  * v1.4 ロジック骨格 完全不変、v1.5.x 性能改善維持、v1.7.0 純正暗転維持、
+    v1.8.0 配点維持、v1.9.0 G ルール維持、v1.9.1 脚質多段維持、v1.10.0 parquet
+    更新維持、v1.11.0 DC 正式化維持、session_state 既存キー破壊なし。
