@@ -157,6 +157,112 @@ def test_existing_morning_race_card_still_loads():
 
 
 # ==================================================================
+# v1.13.1: 開催回コードが英数字(例 "2B")の DC 形式
+# ==================================================================
+# 背景: TARGET の DC 形式は col[0] の開催回コード(4-6 桁目)が英数字に
+# なりうる(例 "05262B0101" の "2B")。旧 is_dc_format は col[0] 全体を
+# isdigit() で要求していたため、回次が進んだ開催日の CSV が DC 検出されず
+# header_csv 経路に落ちて KeyError で読込失敗していた。
+# 注: 複数会場開催は元々 OK(dc_format_sample.csv は 3 会場で動作済)。
+# 真因は「英数字の開催回コード」であって会場数ではない。
+
+# 開催回コードに英字 "B" を含む DC 行(col[0]="05262B0101"、東京 05)
+_DC_ALNUM_MEETING_LINE = (
+    "05262B0101"
+    + "," + ",".join(["0"] * 45)
+)
+
+
+def test_dc_format_detected_with_alphanumeric_meeting_code():
+    """開催回コードが英数字(2B)でも DC として検出される(v1.13.1 修正)。"""
+    assert is_dc_format(_DC_ALNUM_MEETING_LINE) is True
+
+
+def test_dc_format_still_detected_with_numeric_meeting_code():
+    """従来の数値開催回コードも引き続き DC として検出される(regression)。"""
+    assert is_dc_format(_DC_FIRST_LINE) is True
+
+
+def test_dc_format_rejects_unknown_venue_code():
+    """場コードが既知 JRA(01〜10)でなければ DC ではない。"""
+    line = "99262B0101," + ",".join(["0"] * 45)
+    assert is_dc_format(line) is False
+
+
+def test_dc_format_rejects_nonnumeric_race_number_position():
+    """R番(6-8桁目)が数字でない col[0] は DC ではない(構造健全性)。"""
+    # 6-8 桁目 "XX" を英字に: 場05/年26/開催13/R="XX"/馬番01
+    line = "052613XX01," + ",".join(["0"] * 45)
+    assert is_dc_format(line) is False
+
+
+def test_dc_format_rejects_nonnumeric_data_columns():
+    """col[1..9] に数値でない値があれば DC ではない(ヘッダ誤検出回避)。"""
+    line = "05262B0101,foo," + ",".join(["0"] * 44)
+    assert is_dc_format(line) is False
+
+
+def test_multi_meeting_sample_loads_as_dc():
+    """英数字開催回コードの実サンプルが data_format='dc' で読み込める。"""
+    sample = ROOT / "data" / "test" / "dc_format_multi_venue_sample.csv"
+    if not sample.exists():
+        return
+    df = load_race_card(sample)
+    assert df.attrs.get("data_format") == "dc", \
+        f"data_format must be 'dc', got {df.attrs.get('data_format')}"
+    for col in ("race_id", "race_date", "racecourse", "race_number",
+                "horse_id", "horse_number", "distance", "surface"):
+        assert col in df.columns, f"DC 必須列 {col} が欠落"
+
+
+def test_multi_meeting_sample_has_two_venues():
+    """サンプルが 2 会場(東京・京都)を含み、会場が独立して取れる。"""
+    sample = ROOT / "data" / "test" / "dc_format_multi_venue_sample.csv"
+    if not sample.exists():
+        return
+    df = load_race_card(sample)
+    courses = set(df["racecourse"].unique())
+    assert {"東京", "京都"} <= courses, f"会場デコード失敗: {courses}"
+
+
+def test_multi_meeting_sample_race_id_no_collision():
+    """異なる会場のレースが別 race_id になる(東/京 プレフィックス衝突なし)。"""
+    sample = ROOT / "data" / "test" / "dc_format_multi_venue_sample.csv"
+    if not sample.exists():
+        return
+    df = load_race_card(sample)
+    # 各 race_id 内で会場が一意(混在しない)
+    per = df.groupby("race_id")["racecourse"].nunique()
+    assert (per == 1).all(), "1 つの race_id に複数会場が混在している"
+    # 会場別レース数が両方 > 0
+    by_course = df.groupby("racecourse")["race_id"].nunique()
+    assert by_course.get("東京", 0) > 0 and by_course.get("京都", 0) > 0
+
+
+def test_alnum_meeting_parse_decodes_venue_and_meeting():
+    """parse_dc_dataframe が英数字開催回コードを horse_id に保持し場を正しく decode。"""
+    import pandas as pd
+    from utils.target_format import parse_dc_dataframe
+    raw = pd.DataFrame([["05262B0101"] + ["0"] * 45,
+                        ["08263B0501"] + ["0"] * 45])
+    rc, _past = parse_dc_dataframe(raw, target_date_iso="2026-05-30")
+    assert rc.loc[0, "racecourse"] == "東京"
+    assert rc.loc[1, "racecourse"] == "京都"
+    # 開催回コード(2B / 3B)が horse_id に opaque 文字列として入る
+    assert "2B" in rc.loc[0, "horse_id"]
+    assert "3B" in rc.loc[1, "horse_id"]
+
+
+def test_existing_dc_sample_detection_unchanged():
+    """既存 DC サンプル(数値開催回)が引き続き DC 検出される(regression)。"""
+    sample = ROOT / "data" / "test" / "dc_format_sample.csv"
+    if not sample.exists():
+        return
+    df = load_race_card(sample)
+    assert df.attrs.get("data_format") == "dc"
+
+
+# ==================================================================
 # 単体実行用ランナー
 # ==================================================================
 def _all_tests():
