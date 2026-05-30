@@ -1586,3 +1586,92 @@ keiba-yosou/
 
   * rating / probability / ev / course_bias / judgment エンジンは無改変。
     v1.4〜v1.13.0 の全機能完全維持、session_state 既存キー破壊なし。
+- **v1.14.0 data-fix**(現行、2026-05): **historical/races.parquet の `odds` 列を
+  真の単勝オッズに修正**。v1.13.0 EV バックテストの異常(平均 EV +2.7 等)を
+  発端に odds 列の正体を解明 → 別指標だったと判明し、真の単勝オッズに置換。
+  **ロジック(rating/probability/ev/judgment)は一切不変、データ修正のみ。**
+
+  * **🚨 重要な発見(v1.13.0 までの「695%」は誤り)**:
+    `scripts/diagnose_odds_column_v14.py` の統計診断で、parquet の旧 `odds` 列は
+    **実 単勝オッズではなかった**:
+    - 中央値 ~48.6・range 35-62 に密集、着順別・人気別ともほぼフラット
+    - **corr(odds, popularity)=0.036 / corr(odds, finishing_position)=-0.014**
+      (着順・人気と無相関 = オッズではありえない)
+    - 1番人気=最小odds のレース比率 **2.9%**(実オッズなら 95%+)
+    - レース毎 Σ(1/odds)=0.307(健全な単勝本は 1.1-1.3)
+    - 正体: TARGET SE 形式の **col[51]**(~48 中心の別指標)由来。
+
+  * **真の単勝オッズ = SE col[48]**:
+    1着 median 4.60 / corr(odds,pop) 0.732 / Σ(1/odds) 1.264 / 1番人気=min 99%。
+    **現行パーサ `utils/target_history_parser.parse_se_csv` は col[48] を正しく
+    odds にマッピング済**(パーサにバグはない)。問題は **bulk parquet
+    (159k 行、v1.10.0 以前の旧変換)が col[51] 系を誤って odds にしていた**こと。
+
+  * **修正(Pattern B = 旧変換の列取り違え。パーサ無改変、データ再生成のみ)**:
+    `scripts/fix_odds_column_v14.py` で、真オッズソース(SE 形式 CSV、col[48])を
+    `parse_se_csv` で読み (race_id, horse_id) join して odds を上書き:
+    - SE がカバーする **2025-01〜2026-05(65,637 行)→ 真オッズに置換**
+    - **2023-24(95,085 行)はソース無 → NaN**(誤った ~48 値を残すより「不明」が
+      正しい。live 予想は parquet odds を使わず、backtest は NaN を自動スキップ)
+    - dtype は全 26 列で **バックアップと完全一致**(float64 維持、スキーマ非破壊)
+    - バックアップ: `races.parquet.bak.v13_before_v14_odds_fix`
+    - `HISTORICAL_DATA_SCHEMA_VERSION` を `v4-rating-engine → v5-odds-fix` に bump
+
+  * **修正前後の健全性**:
+    | 指標 | 修正前(col51) | 修正後(col48) | 健全域 |
+    |---|---|---|---|
+    | 1着馬 odds 中央値 | 50.8 | **4.60** | 3-5 |
+    | Σ(1/odds) 中央値 | 0.307 | **1.264** | 1.1-1.3 |
+    | 1番人気=最小odds率 | 2.9% | **99.1%** | 90%+ |
+    | corr(odds, popularity) | -0.023 | **0.732** | 強い正 |
+
+  * **真の回収率(2026-04-01〜05-03、336 レース、real odds)**:
+    | 指標 | v1.13.0 表示(誤) | 真の値 |
+    |---|---|---|
+    | ◎本命 単勝回収率 | **695.4%** | **97.1%** |
+    ◎本命選定(rating)自体は不変(◎84 / 1着14.29% / 複勝29.76%)。回収率だけが
+    odds 由来で 695%→97.1% に訂正。97.1% は「平均的投票者の ~75-80% を約 17pt
+    上回る」良好値だが、**プラス収支ではない**(理論上限 100% 未満)。
+
+  * **真の EV 戦略バックテスト(2026-04-01〜05-10、408 レース、real odds)**:
+    | 戦略 | 取引数 | 的中率 | 回収率 | Baseline比 |
+    |---|---|---|---|---|
+    | Baseline ◎本命単勝 | 98 | 14.29% | 88.5% | — |
+    | A: EV>0 | 3448 | 2.12% | 76.1% | -12.3pt |
+    | B: EV>0.10 | 3324 | 1.99% | 76.2% | -12.3pt |
+    | C: EV>0.20 | 3206 | 1.87% | 77.1% | -11.4pt |
+    | D: 最高EV馬1点 | 408 | 1.23% | 70.8% | -17.7pt |
+    | E: Kelly比例(参考) | 3448 | 2.12% | 88.6% | +0.1pt |
+    - **判定: ❌ 全 EV 戦略が Baseline 未満**(D が最悪)。1着馬の平均 EV は
+      **-0.096**(勝つのは低オッズ人気馬、高 EV 馬は滅多に来ない人気薄)=
+      典型的な **favorite-longshot bias**。確率モデルが市場を人気薄側で上回れて
+      いない。
+    - **結論**: 機械的な EV 閾値ベットは有効でない。Phase 2 の EV 表示は
+      「期待値を見る」道具としては有効だが、Phase 3(確率の再キャリブレーション /
+      マーク再定義)が本丸。EV 閾値の既定(20%/10%)は表示用に維持。
+
+  * **テスト**: 全 **307 pass**(既存 295 + 新規 12: SE col[48] マッピング /
+    修正後 parquet 健全性 / dtype 非破壊 / 2023-24 NaN / 2025+ 充足 等)。
+
+  * **ロールバック**:
+    - parquet: `.venv/bin/python scripts/fix_odds_column_v14.py --restore
+      data/historical/races.parquet.bak.v13_before_v14_odds_fix`
+    - コード: `git revert HEAD`(v1.13.1 状態へ)
+
+  * **odds 列を信用する前のチェックリスト(将来の誤認防止)**:
+    1. 1着馬 odds 中央値が 3-5 か(50 前後なら別指標)
+    2. Σ(1/odds) が 1.1-1.3 か(0.3 なら別指標)
+    3. 1番人気=最小odds が 95%+ か
+    4. corr(odds, popularity) が強い正か
+    `scripts/diagnose_odds_column_v14.py` でいつでも再診断できる。
+    **2023-24 の odds は NaN**(真オッズソース未取得)。お父様が 2023-24 の
+    SE CSV を入手できれば `fix_odds_column_v14.py --se` で追加修正可能。
+
+  * **将来の誤認防止メモ**: parquet の旧 odds(~48 中心、SE col[51])は
+    **実オッズではない**。回収率「695%」は全てこの誤データ由来だった。今後
+    odds 系の数値は上記チェックリストを通してから信用すること。
+
+  * rating / probability / ev / course_bias / judgment / target_format /
+    target_history_parser のコードは無改変(データ修正と SCHEMA_VERSION bump のみ)。
+    v1.4〜v1.13.1 の全機能完全維持、session_state 既存キー破壊なし、live 予想
+    フロー不変(parquet odds は live で不使用)。
