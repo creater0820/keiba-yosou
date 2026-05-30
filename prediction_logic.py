@@ -22,6 +22,7 @@ Phase 4: utils/betting_strategy.py(ダート不良補正 / 偶奇絞り / 買い
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -47,6 +48,11 @@ from utils.judgment_engine import (
     get_last_finishing_positions,
 )
 from utils.onmark_rules import collect_onmarks
+from utils.probability_engine import (
+    DEFAULT_TEMPERATURE,
+    HorseProbability,
+    compute_race_probabilities,
+)
 from utils.race_history import (
     determine_running_style,
     determine_running_style_with_confidence,
@@ -63,13 +69,22 @@ from utils.rating_rules import HONMEI_RATING_THRESHOLD
 # v1.0 では使わない設計だが、import エラーを回避するため最小定義を残す。
 @dataclass
 class HorsePrediction:
-    """後方互換のための薄い shim(v1.0 では未使用)。"""
+    """後方互換のための薄い shim(v1.0 では未使用)。
+
+    v1.12.0: 確率派生フィールド(win_prob/place_prob/win_rank)を Optional で
+    追加。既定 None で従来コードは無改変動作(マトリクスレンダラ等が None を
+    無視する)。
+    """
     horse_id: str = ""
     horse_name: str = ""
     jockey: str = ""
     score: float = 0.0
     mark: str = ""
     reasons: list[str] = field(default_factory=list)
+    # v1.12.0: Softmax 派生確率(rating は不変、表示用の派生値)
+    win_prob: Optional[float] = None
+    place_prob: Optional[float] = None
+    win_rank: Optional[int] = None
 
 
 # ==================================================================
@@ -93,6 +108,10 @@ class RacePrediction:
     # Phase 6: rating モード固有
     logic_mode: str = "onmark"                        # "onmark" or "rating"
     horse_ratings: list[HorseRating] = field(default_factory=list)
+    # v1.12.0 Phase 1: rating から softmax で派生した確率(rating は不変)。
+    # DEFAULT_TEMPERATURE でベイクした既定値。UI 側は temperature スライダーの
+    # 値で表示時に再計算するため、これは既定表示 + テスト用の基準値。
+    horse_probabilities: list[HorseProbability] = field(default_factory=list)
 
 
 # ==================================================================
@@ -185,6 +204,22 @@ def _build_horse_mark_data(
             last_finishing_position=last_pos.get(hid),
         ))
     return horses
+
+
+def _derive_probabilities(
+    horse_ratings: list[HorseRating],
+    judgment: JudgmentResult,
+    temperature: float = DEFAULT_TEMPERATURE,
+) -> list[HorseProbability]:
+    """rating + 判定結果から softmax 確率を派生する(v1.12.0 Phase 1)。
+
+    B1/B2 減点で軸候補から外れた馬(judgment.demerit_entries)を除外馬として
+    確率 0 にする。rating には一切影響しない純粋な派生処理。
+    """
+    excluded_ids = {d.horse_id for d in judgment.demerit_entries}
+    return compute_race_probabilities(
+        horse_ratings, excluded_ids=excluded_ids, temperature=temperature,
+    )
 
 
 def _build_race_meta(race_card_df: pd.DataFrame) -> dict:
@@ -353,6 +388,8 @@ def predict_race_v2(
         demerit_entries=judgment.demerit_entries,
         logic_mode="rating",
         horse_ratings=horse_ratings,
+        # v1.12.0: rating から softmax で確率派生(rating は不変)
+        horse_probabilities=_derive_probabilities(horse_ratings, judgment),
     )
 
 
@@ -553,6 +590,8 @@ def predict_race_dc(
         demerit_entries=judgment.demerit_entries,
         logic_mode="dc",
         horse_ratings=horse_ratings,
+        # v1.12.0: rating から softmax で確率派生(rating は不変)
+        horse_probabilities=_derive_probabilities(horse_ratings, judgment),
     )
     pred.race_meta["dc_past_runs"] = {
         h.horse_id: past_runs_by_horse.get(h.horse_id, [None] * 10)
