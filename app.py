@@ -37,6 +37,15 @@ from prediction_logic import (
     RacePrediction,
     predict_all_races_cached,
 )
+from utils.ev_engine import (
+    EV_THRESHOLD_HIGH,
+    EV_THRESHOLD_MID,
+    MIN_ODDS_FOR_RECOMMENDATION,
+    REC_HIGH,
+    REC_LOW,
+    REC_MID,
+    compute_race_evs,
+)
 from utils.probability_engine import (
     DEFAULT_TEMPERATURE,
     compute_race_probabilities,
@@ -236,6 +245,48 @@ def _fmt_pct(value) -> str:
         return "—"
 
 
+# =====================================================================
+# v1.13.0 Phase 2: 期待値(EV)/ 公正オッズ(表示用)
+# =====================================================================
+def _fmt_odds(value) -> str:
+    """オッズを「X.X倍」表記に。None/無限大は「—」。"""
+    if value is None:
+        return "—"
+    try:
+        f = float(value)
+        if not (f == f) or f == float("inf"):  # NaN / inf
+            return "—"
+        return f"{f:.1f}倍"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_ev(value) -> str:
+    """EV(損益率)を「+XX%」/「-XX%」表記に。None は「—」。"""
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value) * 100:+.0f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fair_odds(win_prob) -> float | None:
+    """公正単勝オッズ = 1 / win_prob。0 以下は None。"""
+    try:
+        wp = float(win_prob)
+    except (TypeError, ValueError):
+        return None
+    return 1.0 / wp if wp > 0 else None
+
+
+def _ev_thresholds() -> tuple[float, float]:
+    """サイドバー設定の (高期待値閾値, 中期待値閾値)。割合(0-1)で返す。"""
+    high = float(st.session_state.get("ev_threshold_high", EV_THRESHOLD_HIGH * 100)) / 100.0
+    mid = float(st.session_state.get("ev_threshold_mid", EV_THRESHOLD_MID * 100)) / 100.0
+    return high, mid
+
+
 def _render_probability_table(pred: RacePrediction, prob_by_id: dict) -> None:
     """全頭の単勝/複勝確率ランキング表(単勝確率の高い順)。
 
@@ -263,6 +314,9 @@ def _render_probability_table(pred: RacePrediction, prob_by_id: dict) -> None:
             "rate": r.total_rating,
             "単勝確率": _fmt_pct(p.win_prob),
             "複勝確率": _fmt_pct(p.place_prob),
+            # v1.13.0: 公正オッズ(オッズ不要で自動計算)
+            "公正単勝オッズ": _fmt_odds(_fair_odds(p.win_prob)),
+            "公正複勝オッズ": _fmt_odds(_fair_odds(p.place_prob)),
         })
     if not rows:
         return
@@ -277,11 +331,14 @@ def _render_probability_table(pred: RacePrediction, prob_by_id: dict) -> None:
         "rate": st.column_config.NumberColumn("rate", width="small", format="%d"),
         "単勝確率": st.column_config.TextColumn("単勝確率", width="small"),
         "複勝確率": st.column_config.TextColumn("複勝確率", width="small"),
+        "公正単勝オッズ": st.column_config.TextColumn("公正単勝オッズ", width="small"),
+        "公正複勝オッズ": st.column_config.TextColumn("公正複勝オッズ", width="small"),
     }
     with st.expander("📈 確率ランキング(全頭・単勝確率順)", expanded=False):
         st.caption(
             "rating から softmax で派生した参考確率です(rating 値・◎判定・"
             "買い目には影響しません)。当日の馬場・パドック・展開は反映していません。"
+            " 公正オッズ = この確率なら最低これだけのオッズが必要、という分岐点。"
         )
         tbl_col, _ = st.columns([3, 2])
         with tbl_col:
@@ -294,13 +351,17 @@ def _render_probability_table(pred: RacePrediction, prob_by_id: dict) -> None:
 
 
 def _prob_suffix(prob_by_id: dict | None, horse_id: str) -> str:
-    """軸馬バナー用の「/ 単勝 X.X%・複勝 Y.Y%」サフィックスを作る。"""
+    """軸馬バナー用の「/ 単勝 X.X%・複勝 Y.Y%・公正単勝オッズ Z倍」サフィックス。"""
     if not prob_by_id:
         return ""
     p = prob_by_id.get(horse_id)
     if p is None:
         return ""
-    return f" / 単勝 {_fmt_pct(p.win_prob)}・複勝 {_fmt_pct(p.place_prob)}"
+    fair = _fmt_odds(_fair_odds(p.win_prob))
+    return (
+        f" / 単勝 {_fmt_pct(p.win_prob)}・複勝 {_fmt_pct(p.place_prob)}"
+        f"・公正単勝オッズ {fair}"
+    )
 
 
 def _render_section_main_pick(
@@ -787,6 +848,219 @@ def _expander_title(pred: RacePrediction) -> str:
     return base
 
 
+# =====================================================================
+# v1.13.0 Phase 2: EV 計算ワークベンチ + お買い得馬一覧
+# =====================================================================
+def _market_odds_store(file_hash: str) -> dict:
+    """セッション保持のマーケットオッズ辞書を返す。
+
+    形: { race_id: { horse_number: {"tan": float} } }。
+    出馬表ファイルが変わったら(file_hash 不一致)中身をクリアする。
+    """
+    if st.session_state.get("market_odds_file") != file_hash:
+        st.session_state["market_odds"] = {}
+        st.session_state["market_odds_file"] = file_hash
+    return st.session_state.setdefault("market_odds", {})
+
+
+def _race_label(pred: RacePrediction) -> str:
+    """EV ワークベンチのレース選択用ラベル。"""
+    m = pred.race_meta
+    label = f"{m.get('racecourse','')} {m.get('race_number','')}R"
+    j = pred.judgment
+    axis_id = j.main_pick or j.sub_pick
+    if axis_id:
+        axis = next((h for h in pred.horses if h.horse_id == axis_id), None)
+        if axis:
+            head = "◎" if j.main_pick else "準◎"
+            label += f" {head}{axis.horse_name}"
+    return label
+
+
+def _rating_races_sorted(display_predictions: dict[str, RacePrediction]) -> list[str]:
+    """rating/dc モード(horse_ratings あり)のレース ID を場→時刻→R順で返す。"""
+    rids = [rid for rid, p in display_predictions.items()
+            if getattr(p, "horse_ratings", None)]
+
+    def _key(rid: str) -> tuple:
+        m = display_predictions[rid].race_meta
+        return (m.get("racecourse", ""), m.get("post_time", "") or "99:99",
+                m.get("race_number", 99))
+
+    return sorted(rids, key=_key)
+
+
+def _render_ev_workbench(
+    display_predictions: dict[str, RacePrediction], file_hash: str,
+) -> None:
+    """マーケットオッズ入力 → EV(期待値)計算ワークベンチ。
+
+    レースを 1 つ選び、その出走馬の単勝オッズを入力すると EV と お買い得
+    フラグが即時計算される。入力値は session_state に保持し、お買い得馬一覧
+    で横断集計する。rating / 確率には一切影響しない純粋追加。
+    """
+    rids = _rating_races_sorted(display_predictions)
+    if not rids:
+        return  # onmark モード等(rating なし)は EV 非対応
+
+    store = _market_odds_store(file_hash)
+    high_th, mid_th = _ev_thresholds()
+    temperature = _current_temperature()
+
+    st.divider()
+    st.subheader("💰 期待値(EV)計算 — マーケットオッズ入力")
+    st.caption(
+        "JRA の単勝オッズボードを見て数値を入れると、予測確率との比較で "
+        "EV(期待値=儲け率)と お買い得フラグが出ます。"
+        f"フラグ: {REC_HIGH}(EV≥{high_th*100:.0f}%) / {REC_MID}(≥{mid_th*100:.0f}%) "
+        f"/ {REC_LOW}(>0%、オッズ {MIN_ODDS_FOR_RECOMMENDATION:.0f}倍以上)。"
+        " ※未来の的中を保証するものではありません。"
+    )
+
+    sel = st.selectbox(
+        "オッズを入力するレースを選択",
+        options=rids,
+        format_func=lambda rid: _race_label(display_predictions[rid]),
+        key="ev_selected_race",
+    )
+    pred = display_predictions[sel]
+    prob_by_id = _build_prob_by_id(pred, temperature)
+    if not prob_by_id:
+        st.info("このレースは rating 情報がないため EV を計算できません。")
+        return
+
+    # 馬番昇順に並べ、入力用 DataFrame を作る(マーケット単勝オッズのみ編集可)
+    probs_sorted = sorted(prob_by_id.values(), key=lambda p: p.horse_number)
+    name_by_num = {r.horse_number: r.horse_name for r in pred.horse_ratings}
+    saved = store.get(sel, {})
+    editor_rows = []
+    for p in probs_sorted:
+        saved_odds = saved.get(p.horse_number, {}).get("tan")
+        editor_rows.append({
+            "馬番": p.horse_number,
+            "馬名": name_by_num.get(p.horse_number, ""),
+            "単勝確率": _fmt_pct(p.win_prob),
+            "公正単勝オッズ": _fmt_odds(_fair_odds(p.win_prob)),
+            "マーケット単勝オッズ": saved_odds,
+        })
+    editor_df = pd.DataFrame(editor_rows)
+
+    edited = st.data_editor(
+        editor_df,
+        hide_index=True,
+        use_container_width=True,
+        key=f"ev_editor_{file_hash}_{sel}",
+        column_config={
+            "馬番": st.column_config.NumberColumn("馬番", width="small", format="%d", disabled=True),
+            "馬名": st.column_config.TextColumn("馬名", width="medium", disabled=True),
+            "単勝確率": st.column_config.TextColumn("単勝確率", width="small", disabled=True),
+            "公正単勝オッズ": st.column_config.TextColumn("公正単勝オッズ", width="small", disabled=True),
+            "マーケット単勝オッズ": st.column_config.NumberColumn(
+                "マーケット単勝オッズ(入力)", width="medium",
+                min_value=1.0, max_value=999.0, step=0.1, format="%.1f",
+                help="JRA の単勝オッズを入力(例: 3.5)。空欄なら EV は計算しません。",
+            ),
+        },
+    )
+
+    # 編集結果を session_state に保存(NaN / ≤1.0 は無効として除外)
+    race_store: dict[int, dict] = {}
+    market_odds_dict: dict[int, dict] = {}
+    for rec in edited.to_dict("records"):
+        hn = int(rec["馬番"])
+        val = rec.get("マーケット単勝オッズ")
+        if val is None or (isinstance(val, float) and val != val) or float(val) <= 1.0:
+            continue
+        race_store[hn] = {"tan": float(val)}
+        market_odds_dict[hn] = {"tan": float(val)}
+    if race_store:
+        store[sel] = race_store
+    elif sel in store:
+        del store[sel]
+
+    # EV を計算して結果テーブル(EV 降順)を表示
+    evs = compute_race_evs(
+        probs_sorted, market_odds_dict=market_odds_dict,
+        threshold_high=high_th, threshold_mid=mid_th,
+    )
+    result_rows = []
+    for e in evs:
+        if e.ev_tan is None:
+            continue
+        result_rows.append({
+            "_sort": e.ev_tan,
+            "馬番": e.horse_number,
+            "馬名": name_by_num.get(e.horse_number, ""),
+            "単勝確率": _fmt_pct(e.win_prob),
+            "公正単勝オッズ": _fmt_odds(e.fair_odds_tan),
+            "マーケットオッズ": _fmt_odds(e.market_odds_tan),
+            "EV": _fmt_ev(e.ev_tan),
+            "推奨": e.recommendation,
+        })
+    if result_rows:
+        result_rows.sort(key=lambda x: -x["_sort"])
+        for r in result_rows:
+            del r["_sort"]
+        st.markdown("**EV 計算結果(期待値の高い順)**")
+        st.dataframe(
+            pd.DataFrame(result_rows), hide_index=True, use_container_width=True,
+            column_config={
+                "馬番": st.column_config.NumberColumn("馬番", width="small", format="%d"),
+                "EV": st.column_config.TextColumn("EV", width="small"),
+                "推奨": st.column_config.TextColumn("推奨", width="medium"),
+            },
+        )
+    else:
+        st.caption("↑ マーケット単勝オッズを入力すると EV が表示されます。")
+
+
+def _render_value_horses(display_predictions: dict[str, RacePrediction]) -> None:
+    """お買い得馬一覧 — オッズ入力済みの全レース横断で EV>0 をまとめる。"""
+    store = st.session_state.get("market_odds", {})
+    if not store:
+        return
+
+    high_th, mid_th = _ev_thresholds()
+    temperature = _current_temperature()
+    buckets: dict[str, list[str]] = {REC_HIGH: [], REC_MID: [], REC_LOW: []}
+
+    for rid, race_odds in store.items():
+        pred = display_predictions.get(rid)
+        if pred is None or not getattr(pred, "horse_ratings", None):
+            continue
+        prob_by_id = _build_prob_by_id(pred, temperature)
+        if not prob_by_id:
+            continue
+        name_by_num = {r.horse_number: r.horse_name for r in pred.horse_ratings}
+        m = pred.race_meta
+        evs = compute_race_evs(
+            sorted(prob_by_id.values(), key=lambda p: p.horse_number),
+            market_odds_dict=race_odds,
+            threshold_high=high_th, threshold_mid=mid_th,
+        )
+        for e in evs:
+            if e.recommendation in buckets:
+                line = (
+                    f"{m.get('racecourse','')}{m.get('race_number','')}R "
+                    f"馬番{e.horse_number} {name_by_num.get(e.horse_number,'')} "
+                    f"EV {_fmt_ev(e.ev_tan)}(オッズ {_fmt_odds(e.market_odds_tan)})"
+                )
+                buckets[e.recommendation].append(line)
+
+    if not any(buckets.values()):
+        return
+
+    st.divider()
+    st.subheader("💡 お買い得馬一覧(オッズ入力済みの馬)")
+    for label in (REC_HIGH, REC_MID, REC_LOW):
+        lines = buckets[label]
+        if not lines:
+            continue
+        st.markdown(f"**{label}**")
+        for ln in lines:
+            st.markdown(f"- {ln}")
+
+
 def render_predictions_section(
     *,
     all_predictions: dict[str, RacePrediction],
@@ -1042,6 +1316,16 @@ def render_predictions_section(
 
             _render_section_all_marks(p, prob_by_id)
 
+    # ----- v1.13.0 Phase 2: EV 計算ワークベンチ + お買い得馬一覧 -----
+    # 仕様 3a は「全レースの表に編集可能オッズ列」だが、Streamlit は折りたたみ
+    # expander の中身も毎 rerun で実行するため、34 レース分の data_editor は
+    # v1.7.0 で撤去した重さの再来になる。よって公正オッズは上の確率表に常時
+    # 表示し、マーケットオッズ入力 + EV はここ 1 セクション(レース選択 →
+    # そのレースだけ data_editor)に集約してパフォーマンスを守る。
+    _file_hash_ev = st.session_state.get("uploaded_csv_hash", "")
+    _render_ev_workbench(display_predictions, _file_hash_ev)
+    _render_value_horses(display_predictions)
+
 
 # =====================================================================
 # 過去データの読み込み
@@ -1283,6 +1567,28 @@ with st.sidebar:
     )
     st.caption(
         "確率は rating からの派生表示です(当日の馬場・パドック・展開は反映しません)。"
+    )
+    st.divider()
+
+    # ----- v1.13.0: EV 表示設定(お買い得フラグの閾値) -----
+    st.subheader("💰 EV 表示設定")
+    st.slider(
+        label="お買い得閾値(高期待値 🎯)",
+        min_value=5, max_value=50,
+        value=int(st.session_state.get("ev_threshold_high", EV_THRESHOLD_HIGH * 100)),
+        step=5, key="ev_threshold_high",
+        help="単勝 EV がこの % 以上で「🎯 高期待値」フラグ。",
+    )
+    st.slider(
+        label="お買い得閾値(中期待値 ⭐)",
+        min_value=0, max_value=20,
+        value=int(st.session_state.get("ev_threshold_mid", EV_THRESHOLD_MID * 100)),
+        step=2, key="ev_threshold_mid",
+        help="単勝 EV がこの % 以上で「⭐ お買い得」フラグ。",
+    )
+    st.caption(
+        "予想実行後、メイン画面下部「💰 期待値(EV)計算」でオッズを入力すると "
+        "EV と お買い得フラグが計算されます。"
     )
     st.divider()
 

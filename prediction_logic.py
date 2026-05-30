@@ -47,6 +47,7 @@ from utils.judgment_engine import (
     extract_wide_candidates_v2,
     get_last_finishing_positions,
 )
+from utils.ev_engine import HorseEV, compute_race_evs
 from utils.onmark_rules import collect_onmarks
 from utils.probability_engine import (
     DEFAULT_TEMPERATURE,
@@ -112,6 +113,9 @@ class RacePrediction:
     # DEFAULT_TEMPERATURE でベイクした既定値。UI 側は temperature スライダーの
     # 値で表示時に再計算するため、これは既定表示 + テスト用の基準値。
     horse_probabilities: list[HorseProbability] = field(default_factory=list)
+    # v1.13.0 Phase 2: 確率から公正オッズ + EV を派生(マーケットオッズなしの
+    # 公正オッズ版を常時ベイク)。UI 側でマーケットオッズ入力時に再計算する。
+    horse_evs: list[HorseEV] = field(default_factory=list)
 
 
 # ==================================================================
@@ -378,6 +382,10 @@ def predict_race_v2(
         judgment.main_pick, judgment.sub_pick, wides, horses_v1
     )
 
+    # v1.12.0: 確率派生 / v1.13.0: 公正オッズ版 EV 派生(いずれも rating 不変)
+    probs = _derive_probabilities(horse_ratings, judgment)
+    evs = compute_race_evs(probs, market_odds_dict=None)
+
     return RacePrediction(
         race_id=meta.get("race_id", ""),
         race_meta=meta,
@@ -388,8 +396,8 @@ def predict_race_v2(
         demerit_entries=judgment.demerit_entries,
         logic_mode="rating",
         horse_ratings=horse_ratings,
-        # v1.12.0: rating から softmax で確率派生(rating は不変)
-        horse_probabilities=_derive_probabilities(horse_ratings, judgment),
+        horse_probabilities=probs,
+        horse_evs=evs,
     )
 
 
@@ -580,6 +588,10 @@ def predict_race_dc(
         judgment.main_pick, judgment.sub_pick, wides, horses_v1
     )
 
+    # v1.12.0: 確率派生 / v1.13.0: 公正オッズ版 EV 派生(いずれも rating 不変)
+    probs = _derive_probabilities(horse_ratings, judgment)
+    evs = compute_race_evs(probs, market_odds_dict=None)
+
     pred = RacePrediction(
         race_id=meta.get("race_id", ""),
         race_meta=meta,
@@ -590,8 +602,8 @@ def predict_race_dc(
         demerit_entries=judgment.demerit_entries,
         logic_mode="dc",
         horse_ratings=horse_ratings,
-        # v1.12.0: rating から softmax で確率派生(rating は不変)
-        horse_probabilities=_derive_probabilities(horse_ratings, judgment),
+        horse_probabilities=probs,
+        horse_evs=evs,
     )
     pred.race_meta["dc_past_runs"] = {
         h.horse_id: past_runs_by_horse.get(h.horse_id, [None] * 10)
